@@ -1,11 +1,12 @@
 "use client";
 
-import { chatUrl, parseSourceKey } from "@/lib/media";
+import { chatUrl, type MediaSource } from "@/lib/media";
 import type { MultiItem } from "@/lib/client/state";
 import { PlatformIcon, XIcon } from "../icons";
 
 interface Props {
-  items: { item: MultiItem; label: string }[];
+  /** チャットを出せる枠だけ（追加順） */
+  items: { item: MultiItem; source: MediaSource; label: string }[];
   activeUid: string | null;
   host: string;
   onSelect: (uid: string) => void;
@@ -13,35 +14,26 @@ interface Props {
 }
 
 export function ChatPanel({ items, activeUid, host, onSelect, onClose }: Props) {
-  const chats = items.filter(({ item }) => {
-    const s = parseSourceKey(item.source);
-    return s && chatUrl(s, host);
-  });
-  const active = chats.find(({ item }) => item.uid === activeUid) ?? chats[0];
-  const activeSource = active ? parseSourceKey(active.item.source) : null;
-  const url = activeSource ? chatUrl(activeSource, host) : null;
+  const active = items.find(({ item }) => item.uid === activeUid);
+  const url = active ? chatUrl(active.source, host) : null;
 
   return (
     <aside className="flex h-[55dvh] w-full shrink-0 flex-col border-t border-line bg-panel md:h-auto md:w-80 md:border-l md:border-t-0 xl:w-96">
       <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
         <div className="no-scrollbar flex min-w-0 flex-1 gap-1 overflow-x-auto">
-          {chats.map(({ item, label }) => {
-            const s = parseSourceKey(item.source)!;
-            const selected = item.uid === active?.item.uid;
-            return (
-              <button
-                key={item.uid}
-                type="button"
-                onClick={() => onSelect(item.uid)}
-                className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs ${
-                  selected ? "bg-panel-2 text-white" : "text-muted hover:text-white"
-                }`}
-              >
-                <PlatformIcon platform={s.kind === "yt" ? "youtube" : "twitch"} size={12} />
-                <span className="max-w-28 truncate">{label}</span>
-              </button>
-            );
-          })}
+          {items.map(({ item, source, label }) => (
+            <button
+              key={item.uid}
+              type="button"
+              onClick={() => onSelect(item.uid)}
+              className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs ${
+                item.uid === activeUid ? "bg-panel-2 text-white" : "text-muted hover:text-white"
+              }`}
+            >
+              <PlatformIcon platform={source.kind === "yt" ? "youtube" : "twitch"} size={12} />
+              <span className="max-w-28 truncate">{label}</span>
+            </button>
+          ))}
         </div>
         <button
           type="button"

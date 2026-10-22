@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { PRESET_GROUPS } from "@/data/presets";
-import { streamsUrl, talentActions, useTalents } from "@/lib/client/state";
+import { sanitizeTalents, streamsUrl, talentActions, useTalents } from "@/lib/client/state";
 import { useHydrated } from "@/lib/client/store";
 import { usePolling } from "@/lib/client/usePolling";
 import type { StreamsResponse, Talent } from "@/lib/types";
@@ -38,11 +38,8 @@ export function ChannelsView() {
 
   const importJson = async (file: File) => {
     try {
-      const parsed: unknown = JSON.parse(await file.text());
-      if (!Array.isArray(parsed)) throw new Error("配列ではありません");
-      const list = parsed.filter(
-        (t): t is Talent => !!t && typeof t === "object" && typeof t.id === "string" && typeof t.name === "string",
-      );
+      const list = sanitizeTalents(JSON.parse(await file.text()));
+      if (!list) throw new Error("配列ではありません");
       talentActions.addMany(list);
       toast(`${list.length}件を読み込みました`);
     } catch (e) {
@@ -71,6 +68,7 @@ export function ChannelsView() {
       {editing && (
         <div className="mt-4">
           <TalentForm
+            key={editing === "new" ? "new" : editing.id}
             initial={editing === "new" ? undefined : editing}
             onCancel={() => setEditing(null)}
             onSave={(t) => {

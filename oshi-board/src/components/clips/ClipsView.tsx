@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { formatAgo, formatCount, formatDuration } from "@/lib/format";
 import { useMulti, useTalents } from "@/lib/client/state";
 import { createLocalStore, useHydrated, useLocalStore, useNow } from "@/lib/client/store";
@@ -91,6 +91,9 @@ export function ClipsView() {
   const prefs = useLocalStore(prefsStore);
   const [playing, setPlaying] = useState<Clip | null>(null);
 
+  // 別ページに移ったら再生中の切り抜きを閉じる（Cache Components ではページが非表示で残り、音が鳴り続けるため）
+  useLayoutEffect(() => () => setPlaying(null), []);
+
   const setPrefs = (patch: Partial<ClipPrefs>) => prefsStore.set((p) => ({ ...p, ...patch }));
 
   // 何も選んでいなければ、お気に入り（なければ先頭）の人を表示
@@ -123,7 +126,10 @@ export function ClipsView() {
   }, [clips, prefs.kind, prefs.hideShorts, prefs.sort]);
 
   const toggleTalent = (id: string) => {
-    const current = selectedTalents.map((t) => t.id);
+    // 選んだ順を保つ（7人目を選んだら一番前に選んだ人が外れる）
+    const followed = new Set(talents.map((t) => t.id));
+    const chosen = prefs.selected.filter((x) => followed.has(x));
+    const current = chosen.length > 0 ? chosen : selectedTalents.map((t) => t.id);
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id].slice(-MAX_SELECTED);
     setPrefs({ selected: next });
   };
@@ -261,7 +267,7 @@ export function ClipsView() {
                       type="button"
                       title={added ? "マルチビューから外す" : "マルチビューに追加"}
                       onClick={() =>
-                        toggleInMulti({ source: clip.source, label: talent?.name ?? clip.channelName, title: clip.title })
+                        toggleInMulti({ source: clip.source, label: talent?.name ?? clip.channelName, title: clip.title, chat: false })
                       }
                       className={`grid size-7 shrink-0 place-items-center rounded-full ${
                         added ? "bg-accent text-white" : "border border-line text-muted hover:text-white"

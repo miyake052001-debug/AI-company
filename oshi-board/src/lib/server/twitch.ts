@@ -1,5 +1,5 @@
 import "server-only";
-import { CLIP_PERIOD_MS, type ChannelError, type Clip, type ClipPeriod, type Stream } from "@/lib/types";
+import { CLIP_PERIOD_MS, type ChannelError, type ClipPeriod, type ClipRow, type Stream } from "@/lib/types";
 import { cached, chunk, errorMessage, mapLimit, peek, put } from "./cache";
 
 /*
@@ -11,12 +11,17 @@ import { cached, chunk, errorMessage, mapLimit, peek, put } from "./cache";
 
 const HELIX = "https://api.twitch.tv/helix";
 const SCHEDULE_AHEAD_MS = 7 * 24 * 60 * 60 * 1000;
+/** 1リクエストで新しく取りに行く予定の数。残りは次回以降のポーリングで埋まる（レート制限対策） */
+const SCHEDULE_FETCHES_PER_REQUEST = 25;
 
 export function twitchEnabled(): boolean {
   return !!(process.env.TWITCH_CLIENT_ID && process.env.TWITCH_CLIENT_SECRET);
 }
 
-const g = globalThis as typeof globalThis & { __oshiTwitchToken?: { token: string; expires: number } };
+const g = globalThis as typeof globalThis & {
+  __oshiTwitchToken?: { token: string; expires: number };
+  __oshiTwitchBackoffUntil?: number;
+};
 
 async function appToken(force = false): Promise<string> {
   const current = g.__oshiTwitchToken;
@@ -46,6 +51,10 @@ class HelixError extends Error {
 }
 
 async function helix<T>(path: string, params: [string, string][], retry = true): Promise<T> {
+  // レート制限に当たったら、リセットまで全リクエストを止める
+  const backoff = g.__oshiTwitchBackoffUntil ?? 0;
+  if (backoff > Date.now()) throw new HelixError("Twitch API のレート制限中です。しばらくしてから再試行します", 429);
+
   const url = new URL(`${HELIX}/${path}`);
   for (const [k, v] of params) url.searchParams.append(k, v);
   const res = await fetch(url, {
@@ -58,6 +67,10 @@ async function helix<T>(path: string, params: [string, string][], retry = true):
   if (res.status === 401 && retry) {
     await appToken(true);
     return helix<T>(path, params, false);
+  }
+  if (res.status === 429) {
+    const reset = Number(res.headers.get("Ratelimit-Reset"));
+    g.__oshiTwitchBackoffUntil = reset > 0 ? reset * 1000 : Date.now() + 60_000;
   }
   if (!res.ok) {
     let reason = res.statusText;
@@ -175,19 +188,38 @@ interface ScheduleSegment {
   category?: { name: string } | null;
 }
 
-async function schedule(user: TwitchUser): Promise<ScheduleSegment[]> {
-  return cached(`tw:schedule:${user.id}`, 30 * 60_000, async () => {
+interface Schedule {
+  segments: ScheduleSegment[];
+  vacation: { start_time: string; end_time: string } | null;
+}
+
+async function schedule(user: TwitchUser): Promise<Schedule> {
+  return cached<Schedule>(`tw:schedule:${user.id}`, { ttl: 30 * 60_000, errorTtl: 5 * 60_000 }, async () => {
     try {
-      const data = await helix<{ data: { segments: ScheduleSegment[] | null } }>("schedule", [
-        ["broadcaster_id", user.id],
-        ["first", "10"],
-      ]);
-      return data.data.segments ?? [];
+      const data = await helix<{ data: { segments: ScheduleSegment[] | null; vacation: Schedule["vacation"] } }>(
+        "schedule",
+        [
+          ["broadcaster_id", user.id],
+          ["first", "10"],
+        ],
+      );
+      return { segments: data.data.segments ?? [], vacation: data.data.vacation ?? null };
     } catch (e) {
       // スケジュール未設定の配信者は 404 が返る
-      if (e instanceof HelixError && e.status === 404) return [];
+      if (e instanceof HelixError && e.status === 404) return { segments: [], vacation: null };
       throw e;
     }
+  });
+}
+
+/** 次の予定枠（キャンセル済み・休止期間中の枠は除く） */
+export function nextSegment(s: Schedule, now: number): ScheduleSegment | undefined {
+  const vacationStart = s.vacation ? Date.parse(s.vacation.start_time) : NaN;
+  const vacationEnd = s.vacation ? Date.parse(s.vacation.end_time) : NaN;
+  return s.segments.find((seg) => {
+    const t = Date.parse(seg.start_time);
+    if (seg.canceled_until || !(t > now - 30 * 60_000 && t < now + SCHEDULE_AHEAD_MS)) return false;
+    return !(t >= vacationStart && t < vacationEnd);
   });
 }
 
@@ -202,16 +234,19 @@ export async function getTwitchStreams(logins: string[]): Promise<{ streams: Str
   const streams: Stream[] = [];
   for (const [login, s] of live) streams.push(liveToStream(s, users.get(login)?.avatarUrl));
 
+  // 予定はキャッシュ済みのものを全部使い、未取得のものは1リクエストあたり上限まで取りに行く
+  let budget = SCHEDULE_FETCHES_PER_REQUEST;
+  const targets = [...users.values()].filter((u) => {
+    if (live.has(u.login)) return false; // 配信中なら次回予定は出さない
+    if (peek(`tw:schedule:${u.id}`) !== undefined) return true;
+    return budget-- > 0;
+  });
+
   const now = Date.now();
-  await mapLimit([...users.values()], 6, async (user) => {
+  await mapLimit(targets, 6, async (user) => {
     try {
-      const segments = await schedule(user);
-      const upcoming = segments.find((seg) => {
-        const t = Date.parse(seg.start_time);
-        return !seg.canceled_until && t > now - 30 * 60_000 && t < now + SCHEDULE_AHEAD_MS;
-      });
-      // 配信中なら次回予定は出さない
-      if (!upcoming || live.has(user.login)) return;
+      const upcoming = nextSegment(await schedule(user), now);
+      if (!upcoming) return;
       streams.push({
         id: `tw:${user.login}:sched:${upcoming.id}`,
         source: `tw:${user.login}`,
@@ -233,48 +268,48 @@ export async function getTwitchStreams(logins: string[]): Promise<{ streams: Str
   return { streams, errors };
 }
 
-export async function getTwitchClips(
-  talent: { id: string; twitchLogin: string },
-  period: ClipPeriod,
-): Promise<Clip[]> {
-  return cached(`tw:clips:${talent.twitchLogin}:${period}`, 30 * 60_000, async () => {
-    const users = await twitchUsers([talent.twitchLogin]);
-    const user = users.get(talent.twitchLogin);
-    if (!user) return [];
-    const data = await helix<{
-      data: {
-        id: string;
-        url: string;
-        title: string;
-        view_count: number;
-        created_at: string;
-        thumbnail_url: string;
-        duration: number;
-        creator_name: string;
-      }[];
-    }>("clips", [
-      ["broadcaster_id", user.id],
-      ["started_at", new Date(Date.now() - CLIP_PERIOD_MS[period]).toISOString()],
-      ["ended_at", new Date().toISOString()],
-      ["first", "30"],
-    ]);
-    return data.data.map(
-      (c): Clip => ({
-        id: `twc:${c.id}`,
-        source: `twc:${c.id}`,
-        platform: "twitch",
-        title: c.title,
-        url: c.url,
-        thumbnailUrl: c.thumbnail_url,
-        channelName: `${c.creator_name} さんのクリップ`,
-        talentId: talent.id,
-        publishedAt: c.created_at,
-        viewCount: c.view_count,
-        durationSec: c.duration,
-        via: "twitch",
-      }),
-    );
-  });
+/** 期間内のクリップ（再生数順・30分キャッシュ） */
+export async function getTwitchClips(twitchLogin: string, period: ClipPeriod): Promise<ClipRow[]> {
+  return cached<ClipRow[]>(
+    `tw:clips:${twitchLogin}:${period}`,
+    { ttl: 30 * 60_000, errorTtl: 5 * 60_000, staleOnError: true },
+    async () => {
+      const user = (await twitchUsers([twitchLogin])).get(twitchLogin);
+      if (!user) return [];
+      const data = await helix<{
+        data: {
+          id: string;
+          url: string;
+          title: string;
+          view_count: number;
+          created_at: string;
+          thumbnail_url: string;
+          duration: number;
+          creator_name: string;
+        }[];
+      }>("clips", [
+        ["broadcaster_id", user.id],
+        ["started_at", new Date(Date.now() - CLIP_PERIOD_MS[period]).toISOString()],
+        ["ended_at", new Date().toISOString()],
+        ["first", "30"],
+      ]);
+      return data.data.map(
+        (c): ClipRow => ({
+          id: `twc:${c.id}`,
+          source: `twc:${c.id}`,
+          platform: "twitch",
+          title: c.title,
+          url: c.url,
+          thumbnailUrl: c.thumbnail_url,
+          channelName: `${c.creator_name} さんのクリップ`,
+          publishedAt: c.created_at,
+          viewCount: c.view_count,
+          durationSec: c.duration,
+          via: "twitch",
+        }),
+      );
+    },
+  );
 }
 
 export async function resolveTwitchUser(login: string): Promise<TwitchUser | null> {

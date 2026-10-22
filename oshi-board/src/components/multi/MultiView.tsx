@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { computeLayout } from "@/lib/layout";
 import { chatUrl, fallbackLabel, parseMediaInput, parseSourceKey, sourceKey, type MediaSource } from "@/lib/media";
 import {
@@ -46,6 +46,7 @@ export function MultiView() {
   const [chatUid, setChatUid] = useState<string | null>(null);
   const [reloads, setReloads] = useState<Record<string, number>>({});
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const [active, setActive] = useState(true);
   const stageRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const metaRequested = useRef(new Set<string>());
@@ -82,11 +83,23 @@ export function MultiView() {
     }
   }, [multi]);
 
+  /*
+   * Cache Components ではページ遷移しても前のページは display:none で残る（React の Activity）。
+   * iframe は非表示でも再生し続けて音が鳴るので、非表示になったら iframe ごと外し、戻ったら付け直す。
+   */
+  useLayoutEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Activity から戻ったときにプレイヤーを復帰させる
+    setActive(true);
+    return () => setActive(false);
+  }, []);
+
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     const ro = new ResizeObserver(([entry]) => {
-      setSize({ w: entry.contentRect.width, h: entry.contentRect.height });
+      const { width, height } = entry.contentRect;
+      // 非表示（display:none）の間は 0 になるので無視する
+      if (width > 0 && height > 0) setSize({ w: width, h: height });
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -102,11 +115,19 @@ export function MultiView() {
   const domOrder = useMemo(() => [...multi].sort((a, b) => a.addedAt - b.addedAt), [multi]);
   const position = useMemo(() => new Map(multi.map((m, i) => [m.uid, i])), [multi]);
 
-  const labeled = multi.map((item) => {
-    const source = parseSourceKey(item.source)!;
-    return { item, source, label: labelFor(item, source, index) };
+  const labeled = multi.flatMap((item) => {
+    const source = parseSourceKey(item.source);
+    return source ? [{ item, source, label: labelFor(item, source, index) }] : [];
   });
   const labelByUid = new Map(labeled.map((l) => [l.item.uid, l.label]));
+
+  // チャットを出せる枠（切り抜き・アーカイブは除く）。並び替えでチャットが切り替わらないよう追加順で並べる
+  const hasChat = (item: MultiItem, source: MediaSource) => host !== null && item.chat !== false && !!chatUrl(source, host);
+  const chatItems = labeled
+    .filter(({ item, source }) => hasChat(item, source))
+    .sort((a, b) => a.item.addedAt - b.item.addedAt);
+  const activeChatUid = chatItems.find(({ item }) => item.uid === chatUid)?.item.uid ?? chatItems[0]?.item.uid ?? null;
+  const hasTwitch = labeled.some(({ source }) => source.kind !== "yt" && source.kind !== "demo");
 
   const addInput = (e: FormEvent) => {
     e.preventDefault();
@@ -142,7 +163,6 @@ export function MultiView() {
     multiPrefsStore.set((p) => ({ ...p, chat: true }));
   };
 
-  const hasAnyChat = host !== null && labeled.some(({ source }) => chatUrl(source, host));
 
   return (
     <main className="flex min-h-[calc(100dvh-3.5rem)] flex-col md:h-[calc(100dvh-3.5rem)]">
@@ -186,7 +206,7 @@ export function MultiView() {
                   loading={live.loading}
                   index={index}
                   multi={multi}
-                  onToggle={(s, label) => toggleInMulti({ source: s.source, label, title: s.title })}
+                  onToggle={(s, label) => toggleInMulti({ source: s.source, label, title: s.title, chat: true })}
                 />
               </div>
             </>
@@ -251,7 +271,7 @@ export function MultiView() {
 
       <div ref={wrapRef} className="flex min-h-0 flex-1 flex-col bg-bg md:flex-row">
         <div ref={stageRef} className="relative h-[62dvh] min-w-0 md:h-auto md:flex-1">
-          {hydrated && host && size.w > 0 && multi.length > 0 && (
+          {active && hydrated && host && size.w > 0 && multi.length > 0 && (
             <div className="absolute inset-1">
               {domOrder.map((item) => {
                 const i = position.get(item.uid) ?? 0;
@@ -269,8 +289,8 @@ export function MultiView() {
                     total={multi.length}
                     host={host}
                     focusMode={prefs.layout === "focus"}
-                    hasChat={!!chatUrl(source, host)}
-                    chatActive={prefs.chat && chatUid === item.uid}
+                    hasChat={hasChat(item, source)}
+                    chatActive={prefs.chat && activeChatUid === item.uid}
                     reloadKey={reloads[item.uid] ?? 0}
                     onPromote={() => multiActions.promote(item.uid)}
                     onMove={(dir) => multiActions.move(item.uid, dir)}
@@ -301,7 +321,7 @@ export function MultiView() {
                     loading={live.loading}
                     index={index}
                     multi={multi}
-                    onToggle={(s, label) => toggleInMulti({ source: s.source, label, title: s.title })}
+                    onToggle={(s, label) => toggleInMulti({ source: s.source, label, title: s.title, chat: true })}
                   />
                 </div>
               </div>
@@ -309,10 +329,10 @@ export function MultiView() {
           )}
         </div>
 
-        {prefs.chat && host && (
+        {active && prefs.chat && host && (
           <ChatPanel
-            items={labeled.map(({ item, label }) => ({ item, label }))}
-            activeUid={chatUid}
+            items={chatItems.map(({ item, source, label }) => ({ item, source, label }))}
+            activeUid={activeChatUid}
             host={host}
             onSelect={setChatUid}
             onClose={() => multiPrefsStore.set((p) => ({ ...p, chat: false }))}
@@ -320,9 +340,10 @@ export function MultiView() {
         )}
       </div>
 
-      {hydrated && multi.length > 0 && !prefs.chat && hasAnyChat && (
+      {hydrated && multi.length > 0 && (
         <p className="hidden px-4 py-1 text-[11px] text-muted md:block">
           ヒント: 各プレイヤーにカーソルを合わせると、並び替え・チャット表示・削除ができます。音声は2枠目以降ミュートで始まります。
+          {hasTwitch && " Twitch は 400×300 より小さい枠だと自動再生されないので、▶ を押してください。"}
         </p>
       )}
     </main>

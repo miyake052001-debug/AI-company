@@ -177,7 +177,12 @@ export function StreamsView() {
                 now={now}
                 selected={selected.has(stream.source)}
                 onToggle={() =>
-                  toggleInMulti({ source: stream.source, label: talent?.name ?? stream.channelName, title: stream.title })
+                  toggleInMulti({
+                    source: stream.source,
+                    label: talent?.name ?? stream.channelName,
+                    title: stream.title,
+                    chat: stream.status !== "ended",
+                  })
                 }
               />
             ))}

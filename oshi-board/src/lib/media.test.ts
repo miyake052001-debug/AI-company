@@ -16,6 +16,11 @@ describe("parseMediaInput", () => {
     ["https://clips.twitch.tv/FunnyClipSlug-abc123", "twc:FunnyClipSlug-abc123"],
     ["https://player.twitch.tv/?channel=foo&parent=example.com", "tw:foo"],
     ["yt:dQw4w9WgXcQ", "yt:dQw4w9WgXcQ"],
+    ["https://m.twitch.tv/clip/FunnyClipSlug-abc123", "twc:FunnyClipSlug-abc123"],
+    ["https://www.twitch.tv/KagaSumire/clip/FunnyClipSlug-abc123?filter=clips", "twc:FunnyClipSlug-abc123"],
+    ["https://www.twitch.tv/embed/KagaSumire/chat?parent=x", "tw:kagasumire"],
+    ["https://www.twitch.tv/VIDEOS/2012345678", "twv:2012345678"],
+    ["https://www.twitch.tv/kagasumire/v/2012345678", "twv:2012345678"],
   ])("%s → %s", (input, expected) => {
     const s = parseMediaInput(input);
     expect(s && sourceKey(s)).toBe(expected);
@@ -29,6 +34,8 @@ describe("parseMediaInput", () => {
     "https://www.youtube.com/watch?v=short",
     "https://www.twitch.tv/directory",
     "https://www.twitch.tv/",
+    "https://www.twitch.tv/clip",
+    "https://www.youtube.com/embed/live_stream?channel=UC1DCedRgGHBdm81E1llLhOQ",
   ])("認識しない: %s", (input) => {
     expect(parseMediaInput(input)).toBeNull();
   });

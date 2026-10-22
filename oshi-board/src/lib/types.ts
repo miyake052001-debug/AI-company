@@ -51,6 +51,9 @@ export interface Clip {
   demo?: boolean;
 }
 
+/** プロバイダから取った切り抜き（どのタレントのものかはルート側で付ける。キャッシュを共有するため） */
+export type ClipRow = Omit<Clip, "talentId">;
+
 export interface ProviderStatus {
   youtube: boolean;
   twitch: boolean;

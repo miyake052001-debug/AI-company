@@ -23,61 +23,63 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
   const [group, setGroup] = useState(initial?.group ?? "");
   const [youtube, setYoutube] = useState(initial?.youtubeChannelId ?? "");
   const [twitch, setTwitch] = useState(initial?.twitchLogin ?? "");
-  const [avatarUrl, setAvatarUrl] = useState(initial?.avatarUrl);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!youtube.trim() && !twitch.trim()) {
+    const yt = youtube.trim();
+    const tw = twitch.trim();
+    if (!yt && !tw) {
       setError("YouTube か Twitch のどちらかは入力してください");
       return;
     }
     setBusy(true);
     try {
+      // 名前が空ならチャンネル名を使うので、IDそのままでも問い合わせる。変更のないチャンネルは問い合わせない
+      const nameBlank = !name.trim();
+      const ytChanged = yt !== (initial?.youtubeChannelId ?? "");
+      const twChanged = tw.toLowerCase() !== (initial?.twitchLogin ?? "");
+
       let youtubeChannelId: string | undefined;
       let twitchLogin: string | undefined;
       let resolvedName: string | undefined;
-      let avatar = avatarUrl;
+      let resolvedAvatar: string | undefined;
 
-      const yt = youtube.trim();
       if (yt) {
-        if (YOUTUBE_CHANNEL_ID_RE.test(yt)) youtubeChannelId = yt;
+        if (!ytChanged && !nameBlank && YOUTUBE_CHANNEL_ID_RE.test(yt)) youtubeChannelId = yt;
         else {
           const r = await resolve("youtube", yt);
           youtubeChannelId = r.id;
           resolvedName = r.name;
-          avatar ??= r.avatarUrl;
+          resolvedAvatar = r.avatarUrl;
         }
       }
-
-      const tw = twitch.trim();
       if (tw) {
-        const lower = tw.toLowerCase();
-        if (TWITCH_LOGIN_RE.test(lower)) twitchLogin = lower;
+        if (!twChanged && !nameBlank && TWITCH_LOGIN_RE.test(tw.toLowerCase())) twitchLogin = tw.toLowerCase();
         else {
           const r = await resolve("twitch", tw);
           twitchLogin = r.id;
           resolvedName ??= r.name;
-          avatar ??= r.avatarUrl;
+          resolvedAvatar ??= r.avatarUrl;
         }
       }
 
       const finalName = name.trim() || resolvedName;
       if (!finalName) {
-        setError("名前を入力してください");
+        setError("チャンネル名を取得できませんでした。名前を入力してください");
         return;
       }
-      setAvatarUrl(avatar);
+      // チャンネルを変えたらアイコンも取り直す。お気に入りは編集フォームでは触らない（一覧側の最新値を残す）
+      const channelChanged = (yt && ytChanged) || (tw && twChanged) || (!yt && !!initial?.youtubeChannelId) || (!tw && !!initial?.twitchLogin);
       onSave({
         id: initial?.id ?? newId("t"),
         name: finalName,
         group: group.trim() || undefined,
         youtubeChannelId,
         twitchLogin,
-        avatarUrl: avatar,
-        favorite: initial?.favorite,
+        avatarUrl: channelChanged || !initial ? resolvedAvatar : (initial.avatarUrl ?? resolvedAvatar),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

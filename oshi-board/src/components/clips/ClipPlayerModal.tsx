@@ -49,7 +49,7 @@ export function ClipPlayerModal({ clip, talentName, onClose }: { clip: Clip; tal
           </div>
           <button
             type="button"
-            onClick={() => toggleInMulti({ source: clip.source, label: talentName ?? clip.channelName, title: clip.title })}
+            onClick={() => toggleInMulti({ source: clip.source, label: talentName ?? clip.channelName, title: clip.title, chat: false })}
             className={`flex shrink-0 items-center gap-1 rounded-lg px-3 py-1.5 text-sm ${
               added ? "bg-accent text-white" : "border border-line hover:border-muted/60"
             }`}

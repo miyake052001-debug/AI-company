@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseIsoDuration } from "../format";
-import { toStream, toVideoInfo } from "./youtube";
+import { clipSearchTerm, toStream, toVideoInfo } from "./youtube";
 
 const NOW = Date.parse("2026-10-22T12:00:00Z");
 
@@ -68,5 +68,18 @@ describe("parseIsoDuration", () => {
     ["P1DT1H", 90000],
   ])("%s → %d", (iso, sec) => {
     expect(parseIsoDuration(iso)).toBe(sec);
+  });
+});
+
+describe("clipSearchTerm", () => {
+  it("チャンネル名に含まれる名前ならそのまま使う", () => {
+    expect(clipSearchTerm("兎田ぺこら", "Pekora Ch. 兎田ぺこら")).toBe("兎田ぺこら");
+    expect(clipSearchTerm(" 兎田 ぺこら ", "Pekora Ch. 兎田ぺこら")).toBe("兎田 ぺこら");
+  });
+
+  it("含まれない名前（任意の文字列）は使わず、チャンネル名から作る", () => {
+    expect(clipSearchTerm("なんでも検索", "Pekora Ch. 兎田ぺこら")).toBe("Pekora 兎田ぺこら");
+    expect(clipSearchTerm("x", "Suisei Channel")).toBe("Suisei");
+    expect(clipSearchTerm("", "葛葉 / Kuzuha Channel")).toBe("葛葉 Kuzuha");
   });
 });

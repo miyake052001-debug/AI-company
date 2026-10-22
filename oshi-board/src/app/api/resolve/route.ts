@@ -1,13 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { parseMediaInput } from "@/lib/media";
 import { errorMessage } from "@/lib/server/cache";
 import { resolveTwitchUser, twitchEnabled } from "@/lib/server/twitch";
 import { resolveYouTubeChannel } from "@/lib/server/youtube";
 import { TWITCH_LOGIN_RE, type ResolveResponse } from "@/lib/types";
 
+/** Twitch のチャンネルURL（twitch.tv/<login>/...）か、ログイン名そのもの */
 function twitchLoginFrom(input: string): string | null {
-  const m = /(?:twitch\.tv\/)?([A-Za-z0-9_]{1,25})\/?$/.exec(input.trim());
-  const login = m?.[1]?.toLowerCase();
-  return login && TWITCH_LOGIN_RE.test(login) ? login : null;
+  const raw = input.trim();
+  const bare = /^@?([A-Za-z0-9_]{1,25})$/.exec(raw)?.[1];
+  if (bare) return bare.toLowerCase();
+  const source = parseMediaInput(raw);
+  return source?.kind === "tw" && TWITCH_LOGIN_RE.test(source.id) ? source.id : null;
 }
 
 /** GET /api/resolve?platform=youtube|twitch&q=URL・@ハンドル・ID */

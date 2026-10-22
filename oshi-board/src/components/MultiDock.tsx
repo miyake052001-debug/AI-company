@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { MAX_MULTI, multiActions, useMulti } from "@/lib/client/state";
+import { MAX_MULTI, multiActions, useMulti, type MultiInput } from "@/lib/client/state";
 import { useHydrated } from "@/lib/client/store";
 import { parseSourceKey, fallbackLabel } from "@/lib/media";
 import { PlayIcon, XIcon } from "./icons";
@@ -53,9 +53,10 @@ export function MultiDock() {
 }
 
 /** マルチビューへの追加/削除（結果をトーストで知らせる） */
-export function toggleInMulti(item: { source: string; label: string; title?: string }) {
+export function toggleInMulti(item: MultiInput & { label: string }) {
   const result = multiActions.toggle(item);
   if (result === "full") toast(`マルチビューは最大${MAX_MULTI}枠までです`);
+  else if (result === "invalid") toast("この動画はマルチビューで再生できません");
   else if (result === "added") toast(`「${item.label}」をマルチビューに追加しました`);
   else if (result === "removed") toast(`「${item.label}」をマルチビューから外しました`);
 }

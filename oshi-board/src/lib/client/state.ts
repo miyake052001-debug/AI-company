@@ -4,20 +4,37 @@ import { useMemo } from "react";
 import { DEFAULT_TALENTS } from "@/data/presets";
 import type { LayoutMode } from "@/lib/layout";
 import { parseSourceKey } from "@/lib/media";
-import type { Stream, Talent } from "@/lib/types";
+import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type Stream, type Talent } from "@/lib/types";
 import { createLocalStore, useLocalStore } from "./store";
 
 /* ---------- フォロー中のタレント ---------- */
 
-function validateTalents(v: unknown): Talent[] | null {
+const optionalString = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+/** localStorage やインポートしたJSONを、壊れた値が混ざっていても安全な Talent[] にする */
+export function sanitizeTalents(v: unknown): Talent[] | null {
   if (!Array.isArray(v)) return null;
-  return v.filter(
-    (t): t is Talent =>
-      !!t && typeof t === "object" && typeof t.id === "string" && typeof t.name === "string",
-  );
+  const out: Talent[] = [];
+  for (const t of v) {
+    if (!t || typeof t !== "object") continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.id !== "string" || !r.id || typeof r.name !== "string" || !r.name) continue;
+    const youtubeChannelId = optionalString(r.youtubeChannelId);
+    const twitchLogin = optionalString(r.twitchLogin)?.toLowerCase();
+    out.push({
+      id: r.id,
+      name: r.name,
+      group: optionalString(r.group),
+      youtubeChannelId: youtubeChannelId && YOUTUBE_CHANNEL_ID_RE.test(youtubeChannelId) ? youtubeChannelId : undefined,
+      twitchLogin: twitchLogin && TWITCH_LOGIN_RE.test(twitchLogin) ? twitchLogin : undefined,
+      avatarUrl: optionalString(r.avatarUrl),
+      favorite: r.favorite === true ? true : undefined,
+    });
+  }
+  return out;
 }
 
-export const talentsStore = createLocalStore<Talent[]>("oshiboard:talents:v1", DEFAULT_TALENTS, validateTalents);
+export const talentsStore = createLocalStore<Talent[]>("oshiboard:talents:v1", DEFAULT_TALENTS, sanitizeTalents);
 
 export function useTalents(): Talent[] {
   return useLocalStore(talentsStore);
@@ -94,7 +111,16 @@ export interface MultiItem {
   title?: string;
   /** 2枚目以降はミュートで開始（音が重ならないように） */
   startMuted: boolean;
+  /** ライブチャットがあるか（切り抜き・アーカイブは false）。不明なら undefined */
+  chat?: boolean;
   addedAt: number;
+}
+
+export interface MultiInput {
+  source: string;
+  label?: string;
+  title?: string;
+  chat?: boolean;
 }
 
 function validateMulti(v: unknown): MultiItem[] | null {
@@ -116,7 +142,8 @@ export function useMulti(): MultiItem[] {
 export type AddResult = "added" | "exists" | "full";
 
 export const multiActions = {
-  add(item: { source: string; label?: string; title?: string }): AddResult {
+  add(item: MultiInput): AddResult | "invalid" {
+    if (!parseSourceKey(item.source)) return "invalid";
     const list = multiStore.get();
     if (list.some((m) => m.source === item.source)) return "exists";
     if (list.length >= MAX_MULTI) return "full";
@@ -127,7 +154,7 @@ export const multiActions = {
     return "added";
   },
   /** 追加済みなら外す、なければ追加 */
-  toggle(item: { source: string; label?: string; title?: string }): AddResult | "removed" {
+  toggle(item: MultiInput): AddResult | "invalid" | "removed" {
     const existing = multiStore.get().find((m) => m.source === item.source);
     if (existing) {
       multiActions.remove(existing.uid);
@@ -166,7 +193,7 @@ export const multiActions = {
   replaceWithSources(sources: string[]) {
     const now = Date.now();
     multiStore.set(
-      sources.slice(0, MAX_MULTI).map((source, i) => ({
+      sources.filter((source) => parseSourceKey(source)).slice(0, MAX_MULTI).map((source, i) => ({
         uid: newId("m"),
         source,
         startMuted: i > 0,

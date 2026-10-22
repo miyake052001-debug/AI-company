@@ -31,6 +31,15 @@ export function createLocalStore<T>(key: string, initial: T, validate?: (v: unkn
 
   const emit = () => listeners.forEach((l) => l());
 
+  // 他のタブでの変更に追従する。購読者がいない間も古い値を持ち続けないよう、ストアごとに1つだけ登録する
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", (e) => {
+      if (e.key !== key) return;
+      value = read();
+      emit();
+    });
+  }
+
   const get = (): T => {
     if (value === undefined) value = read();
     return value;
@@ -48,15 +57,8 @@ export function createLocalStore<T>(key: string, initial: T, validate?: (v: unkn
     },
     subscribe(listener) {
       listeners.add(listener);
-      const onStorage = (e: StorageEvent) => {
-        if (e.key !== key) return;
-        value = read();
-        emit();
-      };
-      window.addEventListener("storage", onStorage);
       return () => {
         listeners.delete(listener);
-        window.removeEventListener("storage", onStorage);
       };
     },
   };

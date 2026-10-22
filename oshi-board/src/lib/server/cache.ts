@@ -2,8 +2,11 @@ import "server-only";
 
 /*
  * プロセス内の TTL キャッシュ。
- * API のクォータ節約が目的なので、同じキーへの同時リクエストは1回にまとめる。
+ * API のクォータ節約が目的なので、同じキーへの同時リクエストは1回にまとめ、失敗も短時間キャッシュする。
  * サーバーレス環境ではインスタンスごとのキャッシュになるが、CDN の Cache-Control と併用すれば十分。
+ *
+ * キーの先頭2要素（"yt:video" など）ごとに別の Map に入れて上限を持たせる。
+ * 安いエントリ（存在しないIDの否定キャッシュなど）が大量に入っても、高い検索結果が追い出されないようにするため。
  */
 
 interface Entry {
@@ -11,51 +14,133 @@ interface Entry {
   expires: number;
 }
 
-const MAX_ENTRIES = 5000;
+interface Failure {
+  message: string;
+  expires: number;
+}
+
+const MAX_PER_FAMILY = 3000;
+const MAX_FAILURES = 3000;
 
 const g = globalThis as typeof globalThis & {
-  __oshiCache?: Map<string, Entry>;
+  __oshiCache?: Map<string, Map<string, Entry>>;
+  __oshiFailures?: Map<string, Failure>;
   __oshiInflight?: Map<string, Promise<unknown>>;
+  __oshiBudgets?: Map<string, { window: number; used: number }>;
 };
-const store = (g.__oshiCache ??= new Map());
+const families = (g.__oshiCache ??= new Map());
+const failures = (g.__oshiFailures ??= new Map());
 const inflight = (g.__oshiInflight ??= new Map());
+const budgets = (g.__oshiBudgets ??= new Map());
 
-export function peek<T>(key: string): T | undefined {
-  const hit = store.get(key);
-  if (!hit) return undefined;
-  if (hit.expires <= Date.now()) {
-    store.delete(key);
-    return undefined;
+function familyOf(key: string): Map<string, Entry> {
+  const name = key.split(":", 2).join(":");
+  let family = families.get(name);
+  if (!family) {
+    family = new Map();
+    families.set(name, family);
   }
-  return hit.value as T;
+  return family;
+}
+
+function evict<T extends { expires: number }>(map: Map<string, T>, max: number) {
+  if (map.size <= max) return;
+  const now = Date.now();
+  for (const [k, v] of map) if (v.expires <= now) map.delete(k);
+  // 期限切れを消しても多ければ古い順に消す（Map は挿入順）
+  for (const k of map.keys()) {
+    if (map.size <= max) break;
+    map.delete(k);
+  }
+}
+
+/** 有効期限内の値。期限切れは undefined（ただし peekStale 用に残しておく） */
+export function peek<T>(key: string): T | undefined {
+  const hit = familyOf(key).get(key);
+  return hit && hit.expires > Date.now() ? (hit.value as T) : undefined;
+}
+
+/** 期限切れでも残っていれば返す（API が失敗したときの代替表示用） */
+export function peekStale<T>(key: string): T | undefined {
+  return familyOf(key).get(key)?.value as T | undefined;
 }
 
 export function put<T>(key: string, value: T, ttlMs: number): void {
-  store.delete(key);
-  store.set(key, { value, expires: Date.now() + ttlMs });
-  if (store.size > MAX_ENTRIES) {
-    // Map は挿入順なので先頭が一番古い
-    const oldest = store.keys().next().value;
-    if (oldest !== undefined) store.delete(oldest);
-  }
+  const family = familyOf(key);
+  family.delete(key);
+  family.set(key, { value, expires: Date.now() + ttlMs });
+  evict(family, MAX_PER_FAMILY);
 }
 
-/** キャッシュにあれば返し、なければ fn を実行して保存する。ttl は結果に応じて変えられる */
-export async function cached<T>(key: string, ttl: number | ((value: T) => number), fn: () => Promise<T>): Promise<T> {
+export interface CacheOptions<T> {
+  /** 成功時の保存期間。結果に応じて変えられる */
+  ttl: number | ((value: T) => number);
+  /** 失敗を覚えておく期間。この間は同じキーで API を叩かずに同じエラーを返す */
+  errorTtl?: number | ((error: unknown) => number);
+  /** 失敗したとき、期限切れの古い値があればそれを返す */
+  staleOnError?: boolean;
+}
+
+/** キャッシュにあれば返し、なければ fn を実行して保存する */
+export async function cached<T>(key: string, opts: CacheOptions<T>, fn: () => Promise<T>): Promise<T> {
   const hit = peek<T>(key);
   if (hit !== undefined) return hit;
+
+  const stale = () => (opts.staleOnError ? peekStale<T>(key) : undefined);
+
+  const failure = failures.get(key);
+  if (failure && failure.expires > Date.now()) {
+    const old = stale();
+    if (old !== undefined) return old;
+    throw new Error(failure.message);
+  }
 
   const pending = inflight.get(key);
   if (pending) return pending as Promise<T>;
 
   const promise = fn()
     .then((value) => {
-      put(key, value, typeof ttl === "function" ? ttl(value) : ttl);
+      failures.delete(key);
+      put(key, value, typeof opts.ttl === "function" ? opts.ttl(value) : opts.ttl);
       return value;
+    })
+    .catch((e: unknown) => {
+      if (opts.errorTtl !== undefined) {
+        const ttl = typeof opts.errorTtl === "function" ? opts.errorTtl(e) : opts.errorTtl;
+        failures.set(key, { message: errorMessage(e), expires: Date.now() + ttl });
+        evict(failures, MAX_FAILURES);
+      }
+      const old = stale();
+      if (old !== undefined) return old;
+      throw e;
     })
     .finally(() => inflight.delete(key));
   inflight.set(key, promise);
   return promise;
+}
+
+/** 回数制限に引っかかったときのエラー（短時間だけキャッシュする） */
+export class LimitError extends Error {}
+
+/**
+ * 時間枠ごとの回数制限。枠内で limit 回まで true を返す。
+ * 外部から好きな入力で叩ける API の、クォータを食う呼び出しに上限をかけるために使う。
+ */
+export function takeBudget(name: string, limit: number, windowMs: number, offsetMs = 0): boolean {
+  const window = Math.floor((Date.now() + offsetMs) / windowMs);
+  const current = budgets.get(name);
+  if (!current || current.window !== window) {
+    budgets.set(name, { window, used: 1 });
+    return limit >= 1;
+  }
+  if (current.used >= limit) return false;
+  current.used++;
+  return true;
+}
+
+/** 時間枠の残りを使い切った扱いにする（API 側からクォータ超過が返ったとき） */
+export function exhaustBudget(name: string, windowMs: number, offsetMs = 0): void {
+  budgets.set(name, { window: Math.floor((Date.now() + offsetMs) / windowMs), used: Number.POSITIVE_INFINITY });
 }
 
 /** 同時実行数を制限した map */

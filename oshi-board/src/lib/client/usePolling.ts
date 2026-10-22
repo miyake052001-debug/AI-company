@@ -34,7 +34,10 @@ export function usePolling<T>(url: string | null, intervalMs: number) {
       } catch (e) {
         if (!alive || (e instanceof DOMException && e.name === "AbortError")) return;
         const message = e instanceof Error ? e.message : String(e);
-        setState((prev) => ({ url, data: prev?.url === url ? prev.data : undefined, error: message, at: Date.now() }));
+        // 失敗時は「最後に成功した時刻」を残す（更新時刻の表示が失敗時刻にならないように）
+        setState((prev) =>
+          prev?.url === url ? { ...prev, error: message } : { url, error: message, at: Date.now() },
+        );
       }
     };
 
@@ -60,7 +63,7 @@ export function usePolling<T>(url: string | null, intervalMs: number) {
     data: current?.data,
     error: current?.error,
     loading: !!url && !current,
-    updatedAt: current?.at,
+    updatedAt: current?.data ? current.at : undefined,
     refresh,
   };
 }

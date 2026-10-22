@@ -18,8 +18,10 @@ const TW_CLIP_SLUG = /^[A-Za-z0-9_-]{3,100}$/;
 
 // twitch.tv/<ここ> がチャンネル名ではないパス
 const TWITCH_RESERVED = new Set([
+  "clip",
   "directory",
   "downloads",
+  "embed",
   "drops",
   "friends",
   "inventory",
@@ -100,7 +102,8 @@ export function parseMediaInput(input: string): MediaSource | null {
   if (host === "youtube.com" || host === "youtube-nocookie.com") {
     const v = url.searchParams.get("v");
     if (v) return makeSource("yt", v);
-    if (parts.length >= 2 && ["live", "shorts", "embed", "v"].includes(parts[0])) {
+    // embed/live_stream?channel=... は動画IDではない（チャンネルの現在のライブ）
+    if (parts.length >= 2 && ["live", "shorts", "embed", "v"].includes(parts[0].toLowerCase()) && parts[1] !== "live_stream") {
       return makeSource("yt", parts[1]);
     }
     return null;
@@ -123,10 +126,14 @@ export function parseMediaInput(input: string): MediaSource | null {
   }
 
   if (host === "twitch.tv") {
-    if (parts[0] === "videos" && parts[1]) return makeSource("twv", parts[1]);
-    if (parts.length >= 3 && parts[1] === "clip") return makeSource("twc", parts[2]);
-    if (parts.length >= 3 && parts[1] === "video") return makeSource("twv", parts[2]);
-    if (parts[0]) return makeSource("tw", parts[0]);
+    // キーワードとログイン名は大文字小文字を区別しない。クリップのスラッグは区別するので parts のまま使う
+    const [first, second, third] = parts.map((p) => p.toLowerCase());
+    if (first === "videos" && second) return makeSource("twv", second);
+    if (first === "clip" && second) return makeSource("twc", parts[1]); // m.twitch.tv/clip/<slug>
+    if (first === "embed" && second) return makeSource("tw", second); // twitch.tv/embed/<login>/chat
+    if (third && second === "clip") return makeSource("twc", parts[2]);
+    if (third && (second === "video" || second === "v")) return makeSource("twv", third);
+    if (first) return makeSource("tw", first);
     return null;
   }
 

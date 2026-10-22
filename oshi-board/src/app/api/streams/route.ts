@@ -57,6 +57,11 @@ export async function GET(request: NextRequest) {
     fetchedAt: new Date().toISOString(),
   };
   return NextResponse.json(body, {
-    headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=60" },
+    headers: {
+      // API 全体の失敗（クォータ切れなど）を含む結果は CDN に長く残さない。チャンネル単位の失敗はサーバー側でキャッシュ済み
+      "Cache-Control": errors.some((e) => !e.channel.includes(":"))
+        ? "public, s-maxage=15"
+        : "public, s-maxage=60, stale-while-revalidate=60",
+    },
   });
 }

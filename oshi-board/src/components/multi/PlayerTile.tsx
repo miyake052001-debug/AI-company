@@ -54,6 +54,8 @@ export function PlayerTile(props: Props) {
   const url = embedUrl(source, { host, muted: item.startMuted });
   const external = watchUrl(source);
   const platform = source.kind === "yt" ? "youtube" : source.kind === "demo" ? null : "twitch";
+  // 小さい枠（スマホのサブ枠など）では補助ボタンを隠して、閉じるボタンが押せるようにする
+  const compact = rect.w < 280;
 
   return (
     <div
@@ -80,14 +82,14 @@ export function PlayerTile(props: Props) {
 
       <div className="pointer-events-none absolute inset-x-0 top-1.5 flex justify-center opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-90">
         <div className="pointer-events-auto flex max-w-[calc(100%-12px)] items-center gap-0.5 rounded-full bg-black/80 py-0.5 pl-2.5 pr-1 text-xs shadow-lg backdrop-blur">
-          {platform && <PlatformIcon platform={platform} size={12} />}
-          <span className="ml-1 mr-1 max-w-40 truncate font-medium">{label}</span>
+          {platform && !compact && <PlatformIcon platform={platform} size={12} />}
+          <span className={`mr-1 truncate font-medium ${compact ? "max-w-16" : "ml-1 max-w-40"}`}>{label}</span>
           {focusMode && index > 0 && (
             <ToolButton title="メイン枠にする" onClick={props.onPromote}>
               <CrownIcon size={14} />
             </ToolButton>
           )}
-          {!focusMode && total > 1 && (
+          {!focusMode && !compact && total > 1 && (
             <>
               {index > 0 && (
                 <ToolButton title="前へ移動" onClick={() => props.onMove(-1)}>
@@ -106,12 +108,12 @@ export function PlayerTile(props: Props) {
               <ChatIcon size={14} />
             </ToolButton>
           )}
-          {url && (
+          {url && !compact && (
             <ToolButton title="再読み込み" onClick={props.onReload}>
               <RefreshIcon size={14} />
             </ToolButton>
           )}
-          {external && (
+          {external && !compact && (
             <a
               href={external}
               target="_blank"

@@ -1,24 +1,61 @@
 import "server-only";
 import { parseIsoDuration } from "@/lib/format";
-import { CLIP_PERIOD_MS, YOUTUBE_CHANNEL_ID_RE, type ChannelError, type Clip, type ClipPeriod, type Stream } from "@/lib/types";
-import { cached, chunk, errorMessage, mapLimit, peek, put } from "./cache";
+import { CLIP_PERIOD_MS, YOUTUBE_CHANNEL_ID_RE, type ChannelError, type ClipRow, type Stream } from "@/lib/types";
+import {
+  cached,
+  chunk,
+  errorMessage,
+  exhaustBudget,
+  LimitError,
+  mapLimit,
+  peek,
+  peekStale,
+  put,
+  takeBudget,
+} from "./cache";
 
 /*
  * YouTube の配信状況の取り方（クォータ節約版）
  *   1. チャンネルの RSS（無料・キー不要）で最新動画IDを取る
  *   2. videos.list（50件で1ユニット）でライブ/予定/終了を判定する
- * search.list（1回100ユニット）を使わないので、数十チャンネルを数分おきに更新しても1日の無料枠に収まる。
+ * search.list（1回100ユニット・1日100回程度が上限）を使わないので、数十チャンネルを数分おきに更新しても無料枠に収まる。
  */
 
 const API = "https://www.googleapis.com/youtube/v3";
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+/** YouTube API のクォータは太平洋時間の0時にリセットされる（夏時間は無視した近似） */
+const QUOTA_DAY_OFFSET = -8 * HOUR;
 const RECENT_PER_CHANNEL = 10;
-const UPCOMING_MAX_AHEAD_MS = 14 * 24 * 60 * 60 * 1000;
-const UPCOMING_STALE_MS = 6 * 60 * 60 * 1000;
-const ENDED_WINDOW_MS = 48 * 60 * 60 * 1000;
+const UPCOMING_MAX_AHEAD_MS = 14 * DAY;
+const UPCOMING_STALE_MS = 6 * HOUR;
+const ENDED_WINDOW_MS = 48 * HOUR;
 const FREE_CHAT_RE = /フリー\s*チャット|free\s*chat|freechat|フリチャ/i;
+/** RSS が使えないときの uploads プレイリスト取得（1ユニット）の上限。存在しないIDを大量に送られても枯渇しないように */
+const PLAYLIST_FALLBACK_PER_HOUR = 300;
+const SEARCH_BUDGET = "yt:search";
 
 export function youtubeEnabled(): boolean {
   return !!process.env.YOUTUBE_API_KEY;
+}
+
+function searchDailyLimit(): number {
+  const n = Number(process.env.YOUTUBE_SEARCH_DAILY_LIMIT);
+  return process.env.YOUTUBE_SEARCH_DAILY_LIMIT && Number.isFinite(n) && n >= 0 ? n : 80;
+}
+
+export class YouTubeApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly reason: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function isQuotaError(e: unknown): boolean {
+  return e instanceof YouTubeApiError && e.status === 403 && /quota|rateLimit/i.test(e.reason);
 }
 
 async function ytApi<T>(path: string, params: Record<string, string>): Promise<T> {
@@ -27,12 +64,14 @@ async function ytApi<T>(path: string, params: Record<string, string>): Promise<T
   url.searchParams.set("key", process.env.YOUTUBE_API_KEY ?? "");
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
-    let reason = res.statusText;
+    let reason = "";
+    let message = res.statusText;
     try {
-      const body = (await res.json()) as { error?: { message?: string } };
-      reason = body.error?.message ?? reason;
+      const body = (await res.json()) as { error?: { message?: string; errors?: { reason?: string }[] } };
+      reason = body.error?.errors?.[0]?.reason ?? "";
+      message = body.error?.message ?? message;
     } catch {}
-    throw new Error(`YouTube API ${path}: ${res.status} ${reason}`);
+    throw new YouTubeApiError(res.status, reason, `YouTube API ${path}: ${res.status} ${message}`);
   }
   return (await res.json()) as T;
 }
@@ -125,11 +164,18 @@ export function toStream(v: VideoInfo, now: number, avatarUrl?: string): Stream 
   };
 }
 
-/** RSS から最近の動画IDを取得。RSS が落ちているときは uploads プレイリスト（1ユニット）にフォールバック */
+/**
+ * RSS から最近の動画IDを取得。RSS が落ちているときは uploads プレイリスト（1ユニット）にフォールバック。
+ * 存在しないチャンネルは失敗をキャッシュして、ポーリングのたびにクォータを使わないようにする。
+ */
 async function recentVideoIds(channelId: string): Promise<string[]> {
-  return cached<{ ids: string[]; via: "rss" | "api" }>(
+  const result = await cached<{ ids: string[]; via: "rss" | "api" }>(
     `yt:recent:${channelId}`,
-    (r) => (r.via === "rss" ? 3 * 60_000 : 10 * 60_000),
+    {
+      ttl: (r) => (r.via === "rss" ? 3 * 60_000 : 10 * 60_000),
+      errorTtl: (e) =>
+        e instanceof LimitError ? 5 * 60_000 : e instanceof YouTubeApiError && e.status === 404 ? 6 * HOUR : 30 * 60_000,
+    },
     async () => {
       try {
         const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, {
@@ -141,69 +187,99 @@ async function recentVideoIds(channelId: string): Promise<string[]> {
           return { ids: ids.slice(0, RECENT_PER_CHANNEL), via: "rss" };
         }
       } catch {}
-      const data = await ytApi<{ items?: { contentDetails: { videoId: string } }[] }>("playlistItems", {
-        part: "contentDetails",
-        playlistId: `UU${channelId.slice(2)}`,
-        maxResults: String(RECENT_PER_CHANNEL),
-      });
-      return { ids: (data.items ?? []).map((i) => i.contentDetails.videoId), via: "api" };
+      if (!takeBudget("yt:playlist-fallback", PLAYLIST_FALLBACK_PER_HOUR, HOUR)) {
+        throw new LimitError("YouTube の取得が混み合っています。しばらくしてから再試行します");
+      }
+      try {
+        const data = await ytApi<{ items?: { contentDetails: { videoId: string } }[] }>("playlistItems", {
+          part: "contentDetails",
+          playlistId: `UU${channelId.slice(2)}`,
+          maxResults: String(RECENT_PER_CHANNEL),
+        });
+        return { ids: (data.items ?? []).map((i) => i.contentDetails.videoId), via: "api" };
+      } catch (e) {
+        if (e instanceof YouTubeApiError && e.status === 404) {
+          throw new YouTubeApiError(404, e.reason, "チャンネルが見つかりません（チャンネルIDを確認してください）");
+        }
+        throw e;
+      }
     },
-  ).then((r) => r.ids);
+  );
+  return result.ids;
 }
 
-/** 動画詳細をまとめて取得。ライブ/予定以外は状態が変わらないので長めにキャッシュする */
-async function videoDetails(ids: string[]): Promise<Map<string, VideoInfo>> {
-  const out = new Map<string, VideoInfo>();
+/**
+ * 動画詳細をまとめて取得。ライブ/予定以外は状態が変わらないので長めにキャッシュする。
+ * 一部のバッチが失敗しても、残りと（期限切れでも）前回の値で返す。
+ */
+async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoInfo>; errors: string[] }> {
+  const videos = new Map<string, VideoInfo>();
+  const errors: string[] = [];
   const missing: string[] = [];
   for (const id of new Set(ids)) {
     const hit = peek<VideoInfo | null>(`yt:video:${id}`);
     if (hit === undefined) missing.push(id);
-    else if (hit) out.set(id, hit);
+    else if (hit) videos.set(id, hit);
   }
   for (const batch of chunk(missing, 50)) {
-    const data = await ytApi<{ items?: YtVideoItem[] }>("videos", {
-      part: "snippet,liveStreamingDetails",
-      id: batch.join(","),
-      maxResults: "50",
-    });
-    const found = new Set<string>();
-    for (const item of data.items ?? []) {
-      const info = toVideoInfo(item);
-      if (!info) continue;
-      found.add(info.id);
-      out.set(info.id, info);
-      const active = info.kind === "live" || info.kind === "upcoming";
-      put(`yt:video:${info.id}`, info, active ? 90_000 : 6 * 60 * 60_000);
+    try {
+      const data = await ytApi<{ items?: YtVideoItem[] }>("videos", {
+        part: "snippet,liveStreamingDetails",
+        id: batch.join(","),
+        maxResults: "50",
+      });
+      const found = new Set<string>();
+      for (const item of data.items ?? []) {
+        const info = toVideoInfo(item);
+        if (!info) continue;
+        found.add(info.id);
+        videos.set(info.id, info);
+        const active = info.kind === "live" || info.kind === "upcoming";
+        put(`yt:video:${info.id}`, info, active ? 90_000 : 6 * HOUR);
+      }
+      // 非公開・削除済みは null をキャッシュして毎回問い合わせない
+      for (const id of batch) if (!found.has(id)) put(`yt:video:${id}`, null, 6 * HOUR);
+    } catch (e) {
+      errors.push(errorMessage(e));
+      for (const id of batch) {
+        const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
+        if (stale) videos.set(id, stale);
+      }
     }
-    // 非公開・削除済みは null をキャッシュして毎回問い合わせない
-    for (const id of batch) if (!found.has(id)) put(`yt:video:${id}`, null, 6 * 60 * 60_000);
   }
-  return out;
+  return { videos, errors };
 }
 
-/** チャンネルアイコン（1日キャッシュ） */
-export async function channelAvatars(channelIds: string[]): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+interface ChannelSnippet {
+  title: string;
+  avatarUrl?: string;
+}
+
+/** チャンネル名とアイコン（1日キャッシュ） */
+async function channelSnippets(channelIds: string[]): Promise<Map<string, ChannelSnippet>> {
+  const out = new Map<string, ChannelSnippet>();
   const missing: string[] = [];
   for (const id of new Set(channelIds)) {
-    const hit = peek<string | null>(`yt:avatar:${id}`);
+    const hit = peek<ChannelSnippet | null>(`yt:channel:${id}`);
     if (hit === undefined) missing.push(id);
     else if (hit) out.set(id, hit);
   }
   for (const batch of chunk(missing, 50)) {
-    const data = await ytApi<{ items?: { id: string; snippet: { thumbnails?: YtThumbs } }[] }>("channels", {
-      part: "snippet",
-      id: batch.join(","),
-      maxResults: "50",
-    });
+    const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
+      "channels",
+      { part: "snippet", id: batch.join(","), maxResults: "50" },
+    );
     const found = new Set<string>();
     for (const item of data.items ?? []) {
-      const url = item.snippet.thumbnails?.default?.url ?? item.snippet.thumbnails?.medium?.url;
+      const snippet: ChannelSnippet = {
+        title: item.snippet.title,
+        avatarUrl: item.snippet.thumbnails?.default?.url ?? item.snippet.thumbnails?.medium?.url,
+      };
       found.add(item.id);
-      put(`yt:avatar:${item.id}`, url ?? null, 24 * 60 * 60_000);
-      if (url) out.set(item.id, url);
+      out.set(item.id, snippet);
+      put(`yt:channel:${item.id}`, snippet, DAY);
     }
-    for (const id of batch) if (!found.has(id)) put(`yt:avatar:${id}`, null, 60 * 60_000);
+    for (const id of batch) if (!found.has(id)) put(`yt:channel:${id}`, null, HOUR);
   }
   return out;
 }
@@ -220,73 +296,139 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
   });
 
   const details = await videoDetails(recent.flat());
-  let avatars = new Map<string, string>();
+  for (const message of new Set(details.errors)) errors.push({ channel: "youtube", message });
+
+  let snippets = new Map<string, ChannelSnippet>();
   try {
-    avatars = await channelAvatars(channelIds);
+    snippets = await channelSnippets(channelIds);
   } catch {}
 
   const now = Date.now();
   const wanted = new Set(channelIds);
   const streams: Stream[] = [];
-  for (const info of details.values()) {
+  for (const info of details.videos.values()) {
     if (!wanted.has(info.channelId)) continue;
-    const s = toStream(info, now, avatars.get(info.channelId));
+    const s = toStream(info, now, snippets.get(info.channelId)?.avatarUrl);
     if (s) streams.push(s);
   }
   return { streams, errors };
 }
 
-/* ---------- 切り抜き（search.list フォールバック） ---------- */
+/* ---------- 切り抜き ---------- */
+
+/** 再生数（6時間キャッシュ）。Holodex の切り抜きに再生数を付けるために使う。失敗しても空で返す */
+export async function videoViewCounts(ids: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const missing: string[] = [];
+  for (const id of new Set(ids)) {
+    const hit = peek<number | null>(`yt:views:${id}`);
+    if (hit === undefined) missing.push(id);
+    else if (hit !== null) out.set(id, hit);
+  }
+  for (const batch of chunk(missing, 50)) {
+    try {
+      const data = await ytApi<{ items?: { id: string; statistics?: { viewCount?: string } }[] }>("videos", {
+        part: "statistics",
+        id: batch.join(","),
+        maxResults: "50",
+      });
+      const found = new Set<string>();
+      for (const item of data.items ?? []) {
+        const views = item.statistics?.viewCount ? Number(item.statistics.viewCount) : null;
+        found.add(item.id);
+        put(`yt:views:${item.id}`, views, 6 * HOUR);
+        if (views !== null) out.set(item.id, views);
+      }
+      for (const id of batch) if (!found.has(id)) put(`yt:views:${id}`, null, 6 * HOUR);
+    } catch {
+      break;
+    }
+  }
+  return out;
+}
+
+function normalize(s: string): string {
+  return s.normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+}
 
 /**
- * 「<名前> 切り抜き」で YouTube 検索する。search.list は100ユニットと高いので6時間キャッシュ。
- * Holodex の API キーがある場合はそちらを優先する（clips.ts 参照）。
+ * 検索キーワード。ユーザーが付けた名前がチャンネル名に含まれていればそれを使い、
+ * そうでなければチャンネル名から「Ch.」などを除いたものを使う（任意の文字列で検索させないため）。
  */
-export async function searchYouTubeClips(
-  talent: { id: string; name: string; youtubeChannelId?: string },
-  period: ClipPeriod,
-): Promise<Clip[]> {
-  return cached(`yt:clips:${talent.name}:${period}`, 6 * 60 * 60_000, async () => {
-    const publishedAfter = new Date(Date.now() - CLIP_PERIOD_MS[period]).toISOString();
-    const search = await ytApi<{ items?: { id: { videoId?: string }; snippet: { channelId: string } }[] }>("search", {
-      part: "snippet",
-      type: "video",
-      q: `${talent.name} 切り抜き`,
-      order: "relevance",
-      maxResults: "30",
-      regionCode: "JP",
-      relevanceLanguage: "ja",
-      publishedAfter,
-    });
-    const ids = (search.items ?? [])
-      .filter((i) => i.id.videoId && i.snippet.channelId !== talent.youtubeChannelId)
-      .map((i) => i.id.videoId as string);
-    if (ids.length === 0) return [];
+export function clipSearchTerm(name: string, channelTitle: string): string {
+  const n = normalize(name);
+  if (n.length >= 2 && normalize(channelTitle).includes(n)) return name.trim();
+  const stripped = channelTitle
+    .replace(/(?<![a-z])(ch\.?|channel|official)(?![a-z])|チャンネル|ちゃんねる|公式/gi, " ")
+    .replace(/[【】[\]()（）|｜/／]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped || channelTitle.trim();
+}
 
-    const data = await ytApi<{ items?: YtVideoItem[] }>("videos", {
-      part: "snippet,statistics,contentDetails",
-      id: ids.join(","),
-      maxResults: "50",
-    });
-    return (data.items ?? [])
-      .filter((v) => v.snippet && v.snippet.liveBroadcastContent === "none")
-      .map(
-        (v): Clip => ({
-          id: `yt:${v.id}`,
-          source: `yt:${v.id}`,
-          platform: "youtube",
-          title: v.snippet!.title,
-          url: `https://www.youtube.com/watch?v=${v.id}`,
-          thumbnailUrl: v.snippet!.thumbnails?.medium?.url ?? `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`,
-          channelName: v.snippet!.channelTitle,
-          talentId: talent.id,
-          publishedAt: v.snippet!.publishedAt,
-          viewCount: v.statistics?.viewCount ? Number(v.statistics.viewCount) : undefined,
-          durationSec: parseIsoDuration(v.contentDetails?.duration),
-          via: "youtube-search",
-        }),
-      );
-  });
+/**
+ * 「<名前> 切り抜き」で直近30日を新着順に YouTube 検索する（Holodex が使えないときの代替）。
+ * search.list は高いので、チャンネルごとに1回だけ検索して6時間キャッシュし、期間の絞り込みは呼び出し側で行う。
+ * 1日の検索回数にも上限を設け、超えたら前回の結果（あれば）を返す。
+ */
+export async function searchYouTubeClips(talent: { name: string; youtubeChannelId: string }): Promise<ClipRow[]> {
+  const channelId = talent.youtubeChannelId;
+  return cached<ClipRow[]>(
+    `yt:clips:${channelId}`,
+    { ttl: 6 * HOUR, errorTtl: (e) => (isQuotaError(e) ? HOUR : 10 * 60_000), staleOnError: true },
+    async () => {
+      const channel = (await channelSnippets([channelId])).get(channelId);
+      if (!channel) throw new Error("YouTube チャンネルが見つかりません");
+      if (!takeBudget(SEARCH_BUDGET, searchDailyLimit(), DAY, QUOTA_DAY_OFFSET)) {
+        throw new LimitError(
+          "今日の YouTube 切り抜き検索の上限に達しました（Holodex の API キーを設定すると上限なしで取得できます）",
+        );
+      }
+      let search: { items?: { id: { videoId?: string }; snippet: { channelId: string } }[] };
+      try {
+        search = await ytApi("search", {
+          part: "snippet",
+          type: "video",
+          q: `${clipSearchTerm(talent.name, channel.title)} 切り抜き`,
+          order: "date",
+          maxResults: "50",
+          regionCode: "JP",
+          relevanceLanguage: "ja",
+          publishedAfter: new Date(Date.now() - CLIP_PERIOD_MS["30d"]).toISOString(),
+        });
+      } catch (e) {
+        if (isQuotaError(e)) exhaustBudget(SEARCH_BUDGET, DAY, QUOTA_DAY_OFFSET);
+        throw e;
+      }
+      const ids = (search.items ?? [])
+        .filter((i) => i.id.videoId && i.snippet.channelId !== channelId)
+        .map((i) => i.id.videoId as string);
+      if (ids.length === 0) return [];
+
+      const data = await ytApi<{ items?: YtVideoItem[] }>("videos", {
+        part: "snippet,statistics,contentDetails",
+        id: ids.join(","),
+        maxResults: "50",
+      });
+      return (data.items ?? [])
+        .filter((v) => v.snippet && v.snippet.liveBroadcastContent === "none")
+        .map(
+          (v): ClipRow => ({
+            id: `yt:${v.id}`,
+            source: `yt:${v.id}`,
+            platform: "youtube",
+            title: v.snippet!.title,
+            url: `https://www.youtube.com/watch?v=${v.id}`,
+            thumbnailUrl: v.snippet!.thumbnails?.medium?.url ?? `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`,
+            channelName: v.snippet!.channelTitle,
+            publishedAt: v.snippet!.publishedAt,
+            viewCount: v.statistics?.viewCount ? Number(v.statistics.viewCount) : undefined,
+            durationSec: parseIsoDuration(v.contentDetails?.duration),
+            via: "youtube-search",
+          }),
+        );
+    },
+  );
 }
 
 /* ---------- チャンネルURL / @ハンドルの解決 ---------- */
@@ -327,44 +469,59 @@ async function scrapeChannelPage(url: string): Promise<ResolvedYouTubeChannel | 
 export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouTubeChannel | null> {
   const raw = input.trim();
   const idMatch = /(UC[\w-]{22})/.exec(raw);
-  const handle = /(?:^|\/)@([^/?#\s]+)/.exec(raw)?.[1] ?? (/^[\w.-]{3,30}$/.test(raw) ? raw : undefined);
-  const legacy = /youtube\.com\/(?:c|user)\/([^/?#\s]+)/.exec(raw)?.[1];
-
-  if (youtubeEnabled() && (idMatch || handle)) {
-    const params: Record<string, string> = idMatch
-      ? { part: "snippet", id: idMatch[1] }
-      : { part: "snippet", forHandle: `@${decodeURIComponent(handle!)}` };
-    const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
-      "channels",
-      params,
-    );
-    const item = data.items?.[0];
-    if (item) {
-      return {
-        channelId: item.id,
-        name: item.snippet.title,
-        avatarUrl: item.snippet.thumbnails?.default?.url,
-      };
+  const legacy = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
+  let handle = /(?:^|\/)@([^/?#\s]+)/.exec(raw)?.[1] ?? (!legacy && /^[\w.-]{3,30}$/.test(raw) ? raw : undefined);
+  if (handle) {
+    try {
+      handle = decodeURIComponent(handle);
+    } catch {
+      return null;
     }
-    if (idMatch) return null;
+  }
+
+  if (youtubeEnabled()) {
+    const params: Record<string, string> | null = idMatch
+      ? { part: "snippet", id: idMatch[1] }
+      : handle
+        ? { part: "snippet", forHandle: `@${handle}` }
+        : legacy?.[1] === "user"
+          ? { part: "snippet", forUsername: legacy[2] }
+          : null;
+    if (params) {
+      try {
+        const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
+          "channels",
+          params,
+        );
+        const item = data.items?.[0];
+        if (item) {
+          return { channelId: item.id, name: item.snippet.title, avatarUrl: item.snippet.thumbnails?.default?.url };
+        }
+        if (idMatch) return null;
+      } catch {
+        // API が使えないとき（クォータ切れなど）はページの読み取りにフォールバック
+      }
+    }
   }
 
   if (idMatch && YOUTUBE_CHANNEL_ID_RE.test(idMatch[1])) {
     return (await scrapeChannelPage(`https://www.youtube.com/channel/${idMatch[1]}`)) ?? { channelId: idMatch[1] };
   }
-  if (handle) return scrapeChannelPage(`https://www.youtube.com/@${handle}`);
-  if (legacy) return scrapeChannelPage(`https://www.youtube.com/c/${legacy}`);
+  if (handle) return scrapeChannelPage(`https://www.youtube.com/@${encodeURIComponent(handle)}`);
+  if (legacy) return scrapeChannelPage(`https://www.youtube.com/${legacy[1]}/${encodeURIComponent(legacy[2])}`);
   return null;
 }
 
 /** 貼り付けた動画URLのタイトル取得（oEmbed・キー不要） */
 export async function videoMeta(videoId: string): Promise<{ title: string; author: string } | null> {
-  return cached(`yt:oembed:${videoId}`, 60 * 60_000, async () => {
+  return cached<{ title: string; author: string } | null>(`yt:oembed:${videoId}`, { ttl: HOUR }, async () => {
     const res = await fetch(
       `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`,
       { cache: "no-store" },
     );
-    if (!res.ok) return null;
+    // 存在しない・非公開・埋め込み不可のときだけ「なし」として覚える。一時的なエラーはキャッシュしない
+    if ([400, 401, 403, 404].includes(res.status)) return null;
+    if (!res.ok) throw new Error(`oEmbed: ${res.status}`);
     const json = (await res.json()) as { title?: string; author_name?: string };
     return { title: json.title ?? "", author: json.author_name ?? "" };
   });
