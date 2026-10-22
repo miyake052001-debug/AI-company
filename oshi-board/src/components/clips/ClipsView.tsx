@@ -208,9 +208,10 @@ export function ClipsView() {
         {errors && errors.length > 0 && (
           <p className="text-xs text-amber-300/90">⚠ 一部取得できませんでした: {[...new Set(errors)].join(" / ")}</p>
         )}
-        {truncated && (
+        {truncated && prefs.kind !== "twitch" && (
           <p className="text-xs text-muted">
-            切り抜きが多いため、この期間の新しいものから一部だけ表示しています。期間を短くすると全件表示されます。
+            YouTube の切り抜きが多いため、この期間の新しいものから一部だけ表示しています。
+            {prefs.period !== "24h" && "期間を短くするとより多く表示されます。"}
           </p>
         )}
         {prefs.sort === "views" && visible.some((c) => c.platform === "youtube" && c.viewCount === undefined) && (

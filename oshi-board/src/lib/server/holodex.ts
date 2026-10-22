@@ -1,6 +1,6 @@
 import "server-only";
 import { CLIP_PERIOD_MS, type ClipPeriod, type ClipRow } from "@/lib/types";
-import { cached } from "./cache";
+import { cached, peek } from "./cache";
 import { videoViewCounts, youtubeEnabled } from "./youtube";
 
 /*
@@ -52,18 +52,26 @@ export interface HolodexClips {
   rows: ClipRow[];
   /** 上限ページまで取っても期間の最初まで届かなかった */
   truncated: boolean;
+  /** Holodex がこのチャンネルを追跡しているか（期間内が0件でも、過去の切り抜きがあれば true） */
+  tracked: boolean;
+}
+
+interface CachedHolodexClips extends HolodexClips {
+  /** 再生数を全部付けられたか（一時的な失敗で欠けたら短くキャッシュする） */
+  viewsComplete: boolean;
 }
 
 /** 期間内の切り抜き（新しい順）。YouTube のキーがあれば再生数も付ける（Holodex は再生数を持っていないため） */
 export async function getHolodexClips(youtubeChannelId: string, period: ClipPeriod): Promise<HolodexClips> {
   const plan = PLAN[period];
-  return cached<HolodexClips>(
+  const result = await cached<CachedHolodexClips>(
     `hd:clips:${youtubeChannelId}:${period}`,
-    { ttl: plan.ttl, errorTtl: 5 * 60_000, staleOnError: true },
+    { ttl: (r) => (r.viewsComplete ? plan.ttl : 5 * 60_000), errorTtl: 5 * 60_000, staleOnError: true },
     async () => {
       const cutoff = Date.now() - CLIP_PERIOD_MS[period];
       const rows: ClipRow[] = [];
       let truncated = false;
+      let tracked = false;
       for (let page = 0; page < plan.maxPages; page++) {
         const url = new URL(`${HOLODEX}/channels/${youtubeChannelId}/clips`);
         url.searchParams.set("limit", String(PAGE_SIZE));
@@ -75,6 +83,7 @@ export async function getHolodexClips(youtubeChannelId: string, period: ClipPeri
         });
         if (!res.ok) throw new Error(`Holodex: ${res.status} ${res.statusText}`);
         const videos = (await res.json()) as HolodexVideo[];
+        if (videos.length > 0) tracked = true;
         // 予約中のプレミア公開・配信中・削除済みは再生できる切り抜きではない
         rows.push(
           ...videos.filter((v) => v.status !== "upcoming" && v.status !== "live" && v.status !== "missing").map(toRow),
@@ -86,10 +95,25 @@ export async function getHolodexClips(youtubeChannelId: string, period: ClipPeri
       }
 
       const inPeriod = rows.filter((r) => Date.parse(r.publishedAt) >= cutoff);
-      if (!youtubeEnabled() || inPeriod.length === 0) return { rows: inPeriod, truncated };
+      if (!youtubeEnabled() || inPeriod.length === 0) {
+        return { rows: inPeriod, truncated, tracked, viewsComplete: true };
+      }
       // 再生数は取り直すたびではなく、この結果をキャッシュする間は使い回す（動画ごとにも6時間キャッシュ）
       const views = await videoViewCounts(inPeriod.map((r) => r.source.slice(3)));
-      return { rows: inPeriod.map((r) => ({ ...r, viewCount: views.get(r.source.slice(3)) })), truncated };
+      return {
+        rows: inPeriod.map((r) => ({ ...r, viewCount: views.get(r.source.slice(3)) })),
+        truncated,
+        tracked,
+        viewsComplete: inPeriod.every((r) => views.has(r.source.slice(3)) || peek(`yt:views:${r.source.slice(3)}`) === null),
+      };
     },
   );
+  // キャッシュ後に別のリクエストで取れた再生数があれば補う（API は呼ばない）
+  return {
+    rows: result.rows.map((r) =>
+      r.viewCount !== undefined ? r : { ...r, viewCount: peek<number | null>(`yt:views:${r.source.slice(3)}`) ?? undefined },
+    ),
+    truncated: result.truncated,
+    tracked: result.tracked,
+  };
 }

@@ -59,10 +59,16 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
         }
       }
       if (tw) {
-        if (!twChanged && !nameBlank && !ytRemoved && TWITCH_LOGIN_RE.test(tw.toLowerCase())) {
+        const unchangedLogin = !twChanged && TWITCH_LOGIN_RE.test(tw.toLowerCase());
+        if (unchangedLogin && !nameBlank && !ytRemoved) {
           twitchLogin = tw.toLowerCase();
-        }
-        else {
+        } else if (unchangedLogin && !nameBlank) {
+          // YouTube を外したのでアイコンだけ取り直す。取れなくても保存は止めない（改名・停止済みのアカウントなど）
+          twitchLogin = tw.toLowerCase();
+          try {
+            resolvedAvatar ??= (await resolve("twitch", tw)).avatarUrl;
+          } catch {}
+        } else {
           const r = await resolve("twitch", tw);
           twitchLogin = r.id;
           resolvedName ??= r.name;
@@ -75,9 +81,11 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
         setError("チャンネル名を取得できませんでした。名前を入力してください");
         return;
       }
-      // アイコンは YouTube を優先。元のアイコンのチャンネルが変わっていなければそのまま残す。
+      // 元のアイコンを取ってきたチャンネル（Twitch の画像は jtvnw.net）が変わっていなければそのまま残す。
       // お気に入りは編集フォームでは触らない（一覧側の最新値を残す）
-      const keepAvatar = !!initial && ((yt && !ytChanged) || (!yt && tw && !twChanged && !ytRemoved));
+      const avatarFromTwitch = !!initial?.avatarUrl && /(^|\.)jtvnw\.net\//.test(initial.avatarUrl.replace(/^https?:\/\//, ""));
+      const keepAvatar =
+        !!initial?.avatarUrl && (avatarFromTwitch ? !!tw && !twChanged : !!yt && !ytChanged);
       onSave({
         id: initial?.id ?? newId("t"),
         name: finalName,

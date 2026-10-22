@@ -23,7 +23,6 @@ const MAX_PER_FAMILY = 3000;
 /** 件数が多くなる種類だけ上限を広げる（動画ごとの情報など。1件あたり数百バイト） */
 const FAMILY_LIMITS: Record<string, number> = { "yt:video": 20_000, "yt:views": 30_000 };
 const MAX_FAILURES = 3000;
-const MAX_BUDGETS = 10_000;
 
 const g = globalThis as typeof globalThis & {
   __oshiCache?: Map<string, Map<string, Entry>>;
@@ -132,20 +131,15 @@ export async function cached<T>(key: string, opts: CacheOptions<T>, fn: () => Pr
 export class LimitError extends Error {}
 
 /**
- * 時間枠ごとの回数制限。枠内で limit 回まで true を返す。
+ * 時間枠ごとの回数制限（アプリ全体で共有する上限用。名前は固定の数種類だけにすること）。
  * 外部から好きな入力で叩ける API の、クォータを食う呼び出しに上限をかけるために使う。
+ * IPごとの制限は rateLimit.ts の別の Map で管理する（こちらの上限が追い出されないように）。
  */
 export function takeBudget(name: string, limit: number, windowMs: number, offsetMs = 0): boolean {
   const window = Math.floor((Date.now() + offsetMs) / windowMs);
   const current = budgets.get(name);
   if (!current || current.window !== window) {
-    budgets.delete(name);
     budgets.set(name, { window, used: 1 });
-    // IPごとの制限などで名前が増え続けないよう、古い順に捨てる
-    for (const k of budgets.keys()) {
-      if (budgets.size <= MAX_BUDGETS) break;
-      budgets.delete(k);
-    }
     return limit >= 1;
   }
   if (current.used >= limit) return false;

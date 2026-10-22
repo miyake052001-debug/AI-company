@@ -29,8 +29,8 @@ async function youtubeClips(
   if (providers.holodex) {
     try {
       const result = await getHolodexClips(talent.youtubeChannelId, period);
-      // Holodex が追跡していないチャンネルは空になるので、YouTube 検索に回す
-      if (result.rows.length > 0 || !providers.youtube) return result;
+      // Holodex が追跡していないチャンネルだけ YouTube 検索に回す（期間内が0件なだけなら空のまま）
+      if (result.tracked || !providers.youtube) return { rows: result.rows, truncated: result.truncated };
     } catch (e) {
       if (!providers.youtube) throw e;
       holodexError = e;
