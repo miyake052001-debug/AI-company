@@ -210,8 +210,7 @@ export function ClipsView() {
         )}
         {truncated && prefs.kind !== "twitch" && (
           <p className="text-xs text-muted">
-            YouTube の切り抜きが多いため、この期間の新しいものから一部だけ表示しています。
-            {prefs.period !== "24h" && "期間を短くするとより多く表示されます。"}
+            YouTube の切り抜きが多いため、この期間の新しいものから一部だけ表示しています（それより古いものは表示されていません）。
           </p>
         )}
         {prefs.sort === "views" && visible.some((c) => c.platform === "youtube" && c.viewCount === undefined) && (

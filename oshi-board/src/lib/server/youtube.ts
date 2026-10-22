@@ -66,6 +66,18 @@ function isQuotaError(e: unknown): boolean {
   return e instanceof YouTubeApiError && e.status === 403 && /quota|rateLimit/i.test(e.reason);
 }
 
+const yg = globalThis as typeof globalThis & { __oshiYtQuotaUntil?: number };
+
+/** 通常枠（search 以外）のクォータを使い切っているか（太平洋時間の0時まで） */
+export function youtubeQuotaExhausted(): boolean {
+  return (yg.__oshiYtQuotaUntil ?? 0) > Date.now();
+}
+
+function markQuotaExhausted(): void {
+  const day = Math.floor((Date.now() + QUOTA_DAY_OFFSET) / DAY);
+  yg.__oshiYtQuotaUntil = (day + 1) * DAY - QUOTA_DAY_OFFSET;
+}
+
 async function ytApi<T>(path: string, params: Record<string, string>): Promise<T> {
   const url = new URL(`${API}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -79,7 +91,10 @@ async function ytApi<T>(path: string, params: Record<string, string>): Promise<T
       reason = body.error?.errors?.[0]?.reason ?? "";
       message = body.error?.message ?? message;
     } catch {}
-    throw new YouTubeApiError(res.status, reason, `YouTube API ${path}: ${res.status} ${message}`);
+    const error = new YouTubeApiError(res.status, reason, `YouTube API ${path}: ${res.status} ${message}`);
+    // search.list は別枠なので、それ以外のクォータ切れだけ覚えておく
+    if (path !== "search" && isQuotaError(error)) markQuotaExhausted();
+    throw error;
   }
   return (await res.json()) as T;
 }
@@ -343,7 +358,8 @@ export async function videoViewCounts(ids: string[]): Promise<Map<string, number
     if (hit === undefined) missing.push(id);
     else if (hit !== null) out.set(id, hit);
   }
-  for (const batch of chunk(missing, 50)) {
+  // クォータ切れの間は呼んでも失敗するだけなので呼ばない
+  for (const batch of youtubeQuotaExhausted() ? [] : chunk(missing, 50)) {
     try {
       const data = await ytApi<{ items?: { id: string; statistics?: { viewCount?: string } }[] }>("videos", {
         part: "statistics",

@@ -41,8 +41,9 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
       const nameBlank = !name.trim();
       const ytChanged = yt !== (initial?.youtubeChannelId ?? "");
       const twChanged = tw.toLowerCase() !== (initial?.twitchLogin ?? "");
-      // YouTube を外したら、残った Twitch からアイコンを取り直す
+      // 片方を外したら、残った方からアイコンを取り直す
       const ytRemoved = !yt && !!initial?.youtubeChannelId;
+      const twRemoved = !tw && !!initial?.twitchLogin;
 
       let youtubeChannelId: string | undefined;
       let twitchLogin: string | undefined;
@@ -86,6 +87,12 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
       const avatarFromTwitch = !!initial?.avatarUrl && /(^|\.)jtvnw\.net\//.test(initial.avatarUrl.replace(/^https?:\/\//, ""));
       const keepAvatar =
         !!initial?.avatarUrl && (avatarFromTwitch ? !!tw && !twChanged : !!yt && !ytChanged);
+      if (!keepAvatar && !resolvedAvatar && youtubeChannelId && twRemoved) {
+        // Twitch のアイコンを使っていた人の Twitch を外したので、YouTube のアイコンを取りに行く（失敗しても保存は続ける）
+        try {
+          resolvedAvatar = (await resolve("youtube", youtubeChannelId)).avatarUrl;
+        } catch {}
+      }
       onSave({
         id: initial?.id ?? newId("t"),
         name: finalName,

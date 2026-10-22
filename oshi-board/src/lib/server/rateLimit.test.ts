@@ -1,22 +1,50 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clientIp, normalizeIp } from "./rateLimit";
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("clientIp", () => {
-  it("プロキシが設定するヘッダーを X-Forwarded-For より優先する", () => {
-    const h = new Headers({ "x-forwarded-for": "6.6.6.6, 1.2.3.4", "x-real-ip": "1.2.3.4" });
+  it("既定では X-Forwarded-For の右端（直前のプロキシが付けた値）を使い、偽装できるヘッダーは見ない", () => {
+    vi.stubEnv("VERCEL", "");
+    const h = new Headers({
+      "x-forwarded-for": "6.6.6.6, 1.2.3.4",
+      "x-real-ip": "7.7.7.7",
+      "x-vercel-forwarded-for": "8.8.8.8",
+    });
     expect(clientIp(h)).toBe("1.2.3.4");
+  });
+
+  it("Vercel 上では Vercel が上書きするヘッダーを使う", () => {
+    vi.stubEnv("VERCEL", "1");
     expect(clientIp(new Headers({ "x-vercel-forwarded-for": "9.9.9.9", "x-forwarded-for": "6.6.6.6" }))).toBe("9.9.9.9");
   });
 
-  it("X-Forwarded-For しかなければ右端（直前のプロキシが付けた値）", () => {
-    expect(clientIp(new Headers({ "x-forwarded-for": "6.6.6.6, 1.2.3.4" }))).toBe("1.2.3.4");
+  it("TRUSTED_IP_HEADER / TRUST_PROXY_HOPS で自前のプロキシ構成に合わせられる", () => {
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("TRUSTED_IP_HEADER", "X-Real-IP");
+    expect(clientIp(new Headers({ "x-real-ip": "5.5.5.5", "x-forwarded-for": "6.6.6.6" }))).toBe("5.5.5.5");
+    vi.stubEnv("TRUSTED_IP_HEADER", "");
+    vi.stubEnv("TRUST_PROXY_HOPS", "2");
+    expect(clientIp(new Headers({ "x-forwarded-for": "6.6.6.6, 1.2.3.4, 10.0.0.1" }))).toBe("1.2.3.4");
   });
 });
 
 describe("normalizeIp", () => {
-  it("ポートを外し、IPv6 は /64 にまとめる", () => {
-    expect(normalizeIp("1.2.3.4:5678")).toBe("1.2.3.4");
-    expect(normalizeIp("2001:db8:1:2:aaaa:bbbb:cccc:dddd")).toBe("2001:db8:1:2::/64");
-    expect(normalizeIp("[2001:db8:1:2::1]:443")).toBe("2001:db8:1:2::/64");
+  it.each([
+    ["1.2.3.4:5678", "1.2.3.4"],
+    ["::ffff:198.51.100.1", "198.51.100.1"],
+    ["0:0:0:0:0:ffff:198.51.100.1", "198.51.100.1"],
+    ["2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"],
+    ["[2001:db8:1:2::1]:443", "2001:db8:1:2::/64"],
+    ["2001:db8::1", "2001:db8:0:0::/64"],
+    ["2001::5:1:2:3:4", "2001:0:0:5::/64"],
+    ["::1", "0:0:0:0::/64"],
+    ["fe80::1%eth0", "fe80:0:0:0::/64"],
+  ])("%s → %s", (raw, expected) => {
+    expect(normalizeIp(raw)).toBe(expected);
+  });
+
+  it("IPv4 の接続元は別々のキーになる", () => {
+    expect(normalizeIp("::ffff:1.2.3.4")).not.toBe(normalizeIp("::ffff:5.6.7.8"));
   });
 });

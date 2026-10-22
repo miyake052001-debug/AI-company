@@ -1,7 +1,7 @@
 import "server-only";
 import { CLIP_PERIOD_MS, type ClipPeriod, type ClipRow } from "@/lib/types";
 import { cached, peek } from "./cache";
-import { videoViewCounts, youtubeEnabled } from "./youtube";
+import { videoViewCounts, youtubeEnabled, youtubeQuotaExhausted } from "./youtube";
 
 /*
  * Holodex（https://holodex.net）は VTuber の切り抜きを元配信者に紐づけて管理しているので、
@@ -66,7 +66,12 @@ export async function getHolodexClips(youtubeChannelId: string, period: ClipPeri
   const plan = PLAN[period];
   const result = await cached<CachedHolodexClips>(
     `hd:clips:${youtubeChannelId}:${period}`,
-    { ttl: (r) => (r.viewsComplete ? plan.ttl : 5 * 60_000), errorTtl: 5 * 60_000, staleOnError: true },
+    {
+      // 再生数が一時的な失敗で欠けたときだけ早めに取り直す（クォータ切れなら0時まで直らないので通常どおり）
+      ttl: (r) => (r.viewsComplete || youtubeQuotaExhausted() ? plan.ttl : 5 * 60_000),
+      errorTtl: 5 * 60_000,
+      staleOnError: true,
+    },
     async () => {
       const cutoff = Date.now() - CLIP_PERIOD_MS[period];
       const rows: ClipRow[] = [];

@@ -6,10 +6,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * 外部APIのクォータを第三者に使い切られないための追加の防御で、通常の画面操作では引っかからない回数にしている。
  * クォータ自体はサーバー全体の上限（cache.ts の takeBudget）で守っているので、こちらは多少すり抜けられても致命的ではない。
  *
- * IPはクライアントが書き換えられないヘッダーから取る:
- *   - Vercel: x-vercel-forwarded-for / x-real-ip（Vercel が上書きする）
- *   - nginx などの手前のプロキシ: x-real-ip（$remote_addr を設定しておく）
- * どちらも無い（プロキシなしで next start している）場合は X-Forwarded-For の右端を使うが、偽装できる。
+ * 接続元IPはクライアントが書き換えられない値から取る:
+ *   - Vercel 上: Vercel が上書きする x-vercel-forwarded-for / x-real-ip
+ *   - 自前のサーバー: TRUSTED_IP_HEADER（例: x-real-ip, cf-connecting-ip）に指定したヘッダー。
+ *     未指定なら X-Forwarded-For の右から TRUST_PROXY_HOPS 番目（既定 1 = 直前のプロキシが付けた値）
+ * プロキシなしで next start している場合はクライアントが X-Forwarded-For を偽装できる。
  */
 
 const WINDOW_MS = 60_000;
@@ -18,22 +19,59 @@ const MAX_BUCKETS = 20_000;
 const g = globalThis as typeof globalThis & { __oshiRateLimits?: Map<string, { window: number; used: number }> };
 const buckets = (g.__oshiRateLimits ??= new Map());
 
-/** "1.2.3.4:5678" → "1.2.3.4"、IPv6 は /64 単位にまとめる（1台で大量のアドレスを使えるため） */
+/** "a::b" を8グループに展開する（不正なら null） */
+function expandIpv6(ip: string): string[] | null {
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const tail = halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 1) return null;
+  return [...head, ...Array<string>(missing).fill("0"), ...tail];
+}
+
+/**
+ * 表記ゆれをなくしてバケットのキーにする。
+ * "1.2.3.4:5678" → "1.2.3.4"、"::ffff:1.2.3.4" → "1.2.3.4"、
+ * IPv6 は /64 単位にまとめる（1台で大量のアドレスを使えるため）。
+ */
 export function normalizeIp(raw: string): string {
-  let ip = raw.trim().replace(/^\[|\](?::\d+)?$/g, "");
-  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(ip)) ip = ip.replace(/:\d+$/, "");
+  let ip = raw.trim().toLowerCase();
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(ip);
+  if (bracketed) ip = bracketed[1];
+  ip = ip.replace(/%.*$/, ""); // スコープID（fe80::1%eth0）
+  // IPv4 射影アドレス（デュアルスタックで待ち受けると IPv4 の接続元がこの形になる）
+  const mapped = /^(?:::|(?:0{1,4}:){5})ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip);
+  if (mapped) return mapped[1];
+  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(ip)) return ip.replace(/:\d+$/, "");
   if (ip.includes(":")) {
-    const parts = ip.toLowerCase().split("::")[0].split(":");
-    return `${parts.slice(0, 4).join(":")}::/64`;
+    const groups = expandIpv6(ip);
+    if (!groups) return ip;
+    return `${groups
+      .slice(0, 4)
+      .map((x) => x.replace(/^0+(?=.)/, ""))
+      .join(":")}::/64`;
   }
   return ip || "unknown";
 }
 
 export function clientIp(headers: Headers): string {
-  const trusted = headers.get("x-vercel-forwarded-for") ?? headers.get("x-real-ip");
-  if (trusted) return normalizeIp(trusted.split(",")[0]);
-  const forwarded = headers.get("x-forwarded-for")?.split(",").map((s) => s.trim()).filter(Boolean);
-  return normalizeIp(forwarded?.at(-1) ?? "unknown");
+  if (process.env.VERCEL) {
+    const vercel = headers.get("x-vercel-forwarded-for") ?? headers.get("x-real-ip");
+    if (vercel) return normalizeIp(vercel.split(",")[0]);
+  }
+  const trustedHeader = process.env.TRUSTED_IP_HEADER?.trim().toLowerCase();
+  if (trustedHeader) {
+    const value = headers.get(trustedHeader);
+    if (value) return normalizeIp(value.split(",")[0]);
+  }
+  const forwarded = (headers.get("x-forwarded-for") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const hops = Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1);
+  return normalizeIp(forwarded[Math.max(0, forwarded.length - hops)] ?? "unknown");
 }
 
 function take(key: string, limit: number): boolean {

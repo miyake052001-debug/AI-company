@@ -57,7 +57,10 @@ npm run dev                  # http://localhost:3000
 
 Twitch の埋め込みは HTTPS のページでしか動かないので、本番は必ず HTTPS で配信してください（Vercel なら自動）。
 
-自分のサーバーで動かす場合は、nginx などのプロキシを前に置いて `X-Real-IP` に接続元IP（`$remote_addr`）を設定してください。API の IP ごとの回数制限がこのヘッダーを使います（無いと偽装できる `X-Forwarded-For` を使うことになります）。
+自分のサーバーで動かす場合は、nginx などのプロキシを前に置いてください。API の IP ごとの回数制限は、既定では `X-Forwarded-For` の右端（直前のプロキシが付けた接続元）を使います。プロキシ構成に合わせて次の環境変数で変えられます（プロキシなしで `next start` するとクライアントが偽装できます）。
+
+- `TRUSTED_IP_HEADER`: プロキシが必ず上書きするヘッダー名（例: nginx で `proxy_set_header X-Real-IP $remote_addr;` としているなら `x-real-ip`、Cloudflare なら `cf-connecting-ip`）
+- `TRUST_PROXY_HOPS`: 手前に並んでいるプロキシの数（CDN → nginx なら `2`。既定 `1`）
 
 ## 仕組み
 
