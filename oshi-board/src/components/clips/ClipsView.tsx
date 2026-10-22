@@ -43,6 +43,7 @@ interface FetchState {
   clips: Clip[];
   errors: string[];
   providers?: ProviderStatus;
+  truncated: boolean;
 }
 
 /** 選択中のタレントそれぞれの切り抜きを並列で取得してまとめる */
@@ -72,6 +73,7 @@ function useClips(talents: Talent[], period: ClipPeriod) {
         clips: results.flatMap((r) => r.clips ?? []),
         errors: results.flatMap((r) => (r.errors ?? []).map((e) => e.message)),
         providers: results.find((r) => r.providers)?.providers,
+        truncated: results.some((r) => r.truncated),
       });
     });
     return () => {
@@ -105,7 +107,7 @@ export function ClipsView() {
   }, [talents, prefs.selected]);
   const selectedIds = new Set(selectedTalents.map((t) => t.id));
 
-  const { clips, errors, providers, loading } = useClips(hydrated ? selectedTalents : [], prefs.period);
+  const { clips, errors, providers, truncated, loading } = useClips(hydrated ? selectedTalents : [], prefs.period);
   const talentById = useMemo(() => new Map(talents.map((t) => [t.id, t])), [talents]);
   const inMulti = new Set(multi.map((m) => m.source));
 
@@ -118,10 +120,10 @@ export function ClipsView() {
     // 同じ動画が複数タレントで出たときは1つにする
     const seen = new Set<string>();
     const unique = list.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+    // 再生数が分からない切り抜き（Holodex のみで YouTube キーなし等）は、再生数順でも新しい順で後ろに並ぶ
+    const byDate = (a: Clip, b: Clip) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt);
     return unique.sort((a, b) =>
-      prefs.sort === "views"
-        ? (b.viewCount ?? -1) - (a.viewCount ?? -1)
-        : Date.parse(b.publishedAt) - Date.parse(a.publishedAt),
+      prefs.sort === "views" ? (b.viewCount ?? -1) - (a.viewCount ?? -1) || byDate(a, b) : byDate(a, b),
     );
   }, [clips, prefs.kind, prefs.hideShorts, prefs.sort]);
 
@@ -205,6 +207,14 @@ export function ClipsView() {
 
         {errors && errors.length > 0 && (
           <p className="text-xs text-amber-300/90">⚠ 一部取得できませんでした: {[...new Set(errors)].join(" / ")}</p>
+        )}
+        {truncated && (
+          <p className="text-xs text-muted">
+            切り抜きが多いため、この期間の新しいものから一部だけ表示しています。期間を短くすると全件表示されます。
+          </p>
+        )}
+        {prefs.sort === "views" && visible.some((c) => c.platform === "youtube" && c.viewCount === undefined) && (
+          <p className="text-xs text-muted">再生数が取得できない切り抜きは、再生数順の後ろに新しい順で並べています。</p>
         )}
       </div>
 

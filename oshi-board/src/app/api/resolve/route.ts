@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { rateLimit } from "@/lib/server/rateLimit";
 import { parseMediaInput } from "@/lib/media";
 import { errorMessage } from "@/lib/server/cache";
 import { resolveTwitchUser, twitchEnabled } from "@/lib/server/twitch";
@@ -16,6 +17,8 @@ function twitchLoginFrom(input: string): string | null {
 
 /** GET /api/resolve?platform=youtube|twitch&q=URL・@ハンドル・ID */
 export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "resolve", 20);
+  if (limited) return limited;
   const params = request.nextUrl.searchParams;
   const q = params.get("q")?.trim().slice(0, 300) ?? "";
   const platform = params.get("platform");

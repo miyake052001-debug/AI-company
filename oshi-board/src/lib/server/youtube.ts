@@ -1,6 +1,14 @@
 import "server-only";
+import { PRESET_GROUPS } from "@/data/presets";
 import { parseIsoDuration } from "@/lib/format";
-import { CLIP_PERIOD_MS, YOUTUBE_CHANNEL_ID_RE, type ChannelError, type ClipRow, type Stream } from "@/lib/types";
+import {
+  CLIP_PERIOD_MS,
+  YOUTUBE_CHANNEL_ID_RE,
+  type ChannelError,
+  type ClipPeriod,
+  type ClipRow,
+  type Stream,
+} from "@/lib/types";
 import {
   cached,
   chunk,
@@ -112,7 +120,12 @@ export interface VideoInfo {
   startAt?: string;
   endAt?: string;
   viewers?: number;
+  /** キャッシュに入れた時刻（取得失敗時に古い値を使ってよいかの判断用） */
+  fetchedAt?: number;
 }
+
+/** 取得に失敗したとき、ライブ/予定の古い値を使ってよい時間（それ以上古いと終了済みを LIVE と出してしまう） */
+const STALE_ACTIVE_MS = 15 * 60_000;
 
 export function toVideoInfo(item: YtVideoItem): VideoInfo | null {
   const sn = item.snippet;
@@ -173,8 +186,10 @@ async function recentVideoIds(channelId: string): Promise<string[]> {
     `yt:recent:${channelId}`,
     {
       ttl: (r) => (r.via === "rss" ? 3 * 60_000 : 10 * 60_000),
+      // 存在しないチャンネルは長く覚える。一時的な失敗はすぐ再試行し、その間は前回の結果を使う
       errorTtl: (e) =>
-        e instanceof LimitError ? 5 * 60_000 : e instanceof YouTubeApiError && e.status === 404 ? 6 * HOUR : 30 * 60_000,
+        e instanceof YouTubeApiError && e.status === 404 ? 6 * HOUR : e instanceof LimitError ? 5 * 60_000 : 2 * 60_000,
+      staleOnError: true,
     },
     async () => {
       try {
@@ -235,7 +250,7 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
         found.add(info.id);
         videos.set(info.id, info);
         const active = info.kind === "live" || info.kind === "upcoming";
-        put(`yt:video:${info.id}`, info, active ? 90_000 : 6 * HOUR);
+        put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, active ? 90_000 : 6 * HOUR);
       }
       // 非公開・削除済みは null をキャッシュして毎回問い合わせない
       for (const id of batch) if (!found.has(id)) put(`yt:video:${id}`, null, 6 * HOUR);
@@ -243,7 +258,10 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
       errors.push(errorMessage(e));
       for (const id of batch) {
         const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
-        if (stale) videos.set(id, stale);
+        if (!stale) continue;
+        // 終了済み・通常動画は状態が変わらないので使ってよい。ライブ/予定は最近の値だけ
+        const settled = stale.kind === "ended" || stale.kind === "video";
+        if (settled || Date.now() - (stale.fetchedAt ?? 0) < STALE_ACTIVE_MS) videos.set(id, stale);
       }
     }
   }
@@ -340,8 +358,9 @@ export async function videoViewCounts(ids: string[]): Promise<Map<string, number
         if (views !== null) out.set(item.id, views);
       }
       for (const id of batch) if (!found.has(id)) put(`yt:views:${id}`, null, 6 * HOUR);
-    } catch {
-      break;
+    } catch (e) {
+      // クォータ切れなら残りも失敗するのでやめる。一時的な失敗なら次のバッチは続ける
+      if (isQuotaError(e)) break;
     }
   }
   return out;
@@ -351,31 +370,54 @@ function normalize(s: string): string {
   return s.normalize("NFKC").toLowerCase().replace(/\s+/g, "");
 }
 
-/**
- * 検索キーワード。ユーザーが付けた名前がチャンネル名に含まれていればそれを使い、
- * そうでなければチャンネル名から「Ch.」などを除いたものを使う（任意の文字列で検索させないため）。
- */
-export function clipSearchTerm(name: string, channelTitle: string): string {
-  const n = normalize(name);
-  if (n.length >= 2 && normalize(channelTitle).includes(n)) return name.trim();
-  const stripped = channelTitle
-    .replace(/(?<![a-z])(ch\.?|channel|official)(?![a-z])|チャンネル|ちゃんねる|公式/gi, " ")
-    .replace(/[【】[\]()（）|｜/／]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return stripped || channelTitle.trim();
-}
+const TITLE_STOPWORDS = new Set(["ch", "channel", "official", "公式", "チャンネル", "ちゃんねる"]);
+const TITLE_SEPARATORS = /[\s/／|｜・【】[\]()（）.,、。!！?？]+/;
+
+/** プリセットに登録されている名前（チャンネルID → 名前） */
+const PRESET_NAMES = new Map(
+  PRESET_GROUPS.flatMap((g) => g.talents)
+    .filter((t) => t.youtubeChannelId)
+    .map((t) => [t.youtubeChannelId as string, t.name]),
+);
 
 /**
- * 「<名前> 切り抜き」で直近30日を新着順に YouTube 検索する（Holodex が使えないときの代替）。
- * search.list は高いので、チャンネルごとに1回だけ検索して6時間キャッシュし、期間の絞り込みは呼び出し側で行う。
- * 1日の検索回数にも上限を設け、超えたら前回の結果（あれば）を返す。
+ * 切り抜き検索のキーワード。検索結果は全員で共有するので、外から渡された文字列をそのまま使わない。
+ *   1. プリセットのチャンネルならプリセットの名前
+ *   2. ユーザーが付けた名前がチャンネル名の単語と完全に一致すればそれ
+ *   3. それ以外はチャンネル名から「Ch.」などを除いたもの
  */
-export async function searchYouTubeClips(talent: { name: string; youtubeChannelId: string }): Promise<ClipRow[]> {
+export function clipSearchTerm(name: string, channelTitle: string, presetName?: string): string {
+  if (presetName) return presetName;
+  const tokens = channelTitle
+    .split(TITLE_SEPARATORS)
+    .map((t) => t.trim().replace(/(?:ちゃんねる|チャンネル|channel|official|公式)$/i, ""))
+    .filter((t) => t && !TITLE_STOPWORDS.has(normalize(t)));
+  const n = normalize(name);
+  if (n && tokens.some((t) => normalize(t) === n)) return name.trim();
+  return tokens.join(" ") || channelTitle.trim();
+}
+
+/** 期間ごとの検索方法: 24時間は新着順、1週間・1ヶ月は再生数順（人気の切り抜きが埋もれないように） */
+const SEARCH_PLAN: Record<ClipPeriod, { order: "date" | "viewCount"; ttl: number }> = {
+  "24h": { order: "date", ttl: 3 * HOUR },
+  "7d": { order: "viewCount", ttl: 12 * HOUR },
+  "30d": { order: "viewCount", ttl: DAY },
+};
+
+/**
+ * 「<名前> 切り抜き」で YouTube 検索する（Holodex が使えないときの代替）。
+ * search.list は高いので、チャンネル×期間ごとに長めにキャッシュし、1日の検索回数にも上限を設ける。
+ * 上限に達したら前回の結果（あれば）を返す。
+ */
+export async function searchYouTubeClips(
+  talent: { name: string; youtubeChannelId: string },
+  period: ClipPeriod,
+): Promise<ClipRow[]> {
   const channelId = talent.youtubeChannelId;
+  const plan = SEARCH_PLAN[period];
   return cached<ClipRow[]>(
-    `yt:clips:${channelId}`,
-    { ttl: 6 * HOUR, errorTtl: (e) => (isQuotaError(e) ? HOUR : 10 * 60_000), staleOnError: true },
+    `yt:clips:${channelId}:${period}`,
+    { ttl: plan.ttl, errorTtl: (e) => (isQuotaError(e) ? HOUR : 10 * 60_000), staleOnError: true },
     async () => {
       const channel = (await channelSnippets([channelId])).get(channelId);
       if (!channel) throw new Error("YouTube チャンネルが見つかりません");
@@ -389,12 +431,12 @@ export async function searchYouTubeClips(talent: { name: string; youtubeChannelI
         search = await ytApi("search", {
           part: "snippet",
           type: "video",
-          q: `${clipSearchTerm(talent.name, channel.title)} 切り抜き`,
-          order: "date",
+          q: `${clipSearchTerm(talent.name, channel.title, PRESET_NAMES.get(channelId))} 切り抜き`,
+          order: plan.order,
           maxResults: "50",
           regionCode: "JP",
           relevanceLanguage: "ja",
-          publishedAfter: new Date(Date.now() - CLIP_PERIOD_MS["30d"]).toISOString(),
+          publishedAfter: new Date(Date.now() - CLIP_PERIOD_MS[period]).toISOString(),
         });
       } catch (e) {
         if (isQuotaError(e)) exhaustBudget(SEARCH_BUDGET, DAY, QUOTA_DAY_OFFSET);
@@ -469,7 +511,15 @@ async function scrapeChannelPage(url: string): Promise<ResolvedYouTubeChannel | 
 export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouTubeChannel | null> {
   const raw = input.trim();
   const idMatch = /(UC[\w-]{22})/.exec(raw);
-  const legacy = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
+  const legacyMatch = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
+  let legacy: { kind: string; name: string } | undefined;
+  if (legacyMatch) {
+    let name = legacyMatch[2];
+    try {
+      name = decodeURIComponent(name);
+    } catch {}
+    legacy = { kind: legacyMatch[1], name };
+  }
   let handle = /(?:^|\/)@([^/?#\s]+)/.exec(raw)?.[1] ?? (!legacy && /^[\w.-]{3,30}$/.test(raw) ? raw : undefined);
   if (handle) {
     try {
@@ -484,8 +534,8 @@ export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouT
       ? { part: "snippet", id: idMatch[1] }
       : handle
         ? { part: "snippet", forHandle: `@${handle}` }
-        : legacy?.[1] === "user"
-          ? { part: "snippet", forUsername: legacy[2] }
+        : legacy?.kind === "user"
+          ? { part: "snippet", forUsername: legacy.name }
           : null;
     if (params) {
       try {
@@ -508,7 +558,7 @@ export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouT
     return (await scrapeChannelPage(`https://www.youtube.com/channel/${idMatch[1]}`)) ?? { channelId: idMatch[1] };
   }
   if (handle) return scrapeChannelPage(`https://www.youtube.com/@${encodeURIComponent(handle)}`);
-  if (legacy) return scrapeChannelPage(`https://www.youtube.com/${legacy[1]}/${encodeURIComponent(legacy[2])}`);
+  if (legacy) return scrapeChannelPage(`https://www.youtube.com/${legacy.kind}/${encodeURIComponent(legacy.name)}`);
   return null;
 }
 

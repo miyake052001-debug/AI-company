@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { rateLimit } from "@/lib/server/rateLimit";
 import { errorMessage } from "@/lib/server/cache";
 import { demoStreams } from "@/lib/server/demo";
 import { parseList, providerStatus } from "@/lib/server/providers";
@@ -17,6 +18,8 @@ function compare(a: Stream, b: Stream): number {
 
 /** GET /api/streams?yt=UCxxx,UCyyy&tw=login1,login2 */
 export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "streams", 60);
+  if (limited) return limited;
   const params = request.nextUrl.searchParams;
   const yt = parseList(params.get("yt"), 150).filter((id) => YOUTUBE_CHANNEL_ID_RE.test(id));
   const tw = parseList(params.get("tw")?.toLowerCase() ?? null, 100).filter((l) => TWITCH_LOGIN_RE.test(l));

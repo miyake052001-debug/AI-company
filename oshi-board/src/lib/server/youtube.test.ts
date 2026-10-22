@@ -81,5 +81,12 @@ describe("clipSearchTerm", () => {
     expect(clipSearchTerm("なんでも検索", "Pekora Ch. 兎田ぺこら")).toBe("Pekora 兎田ぺこら");
     expect(clipSearchTerm("x", "Suisei Channel")).toBe("Suisei");
     expect(clipSearchTerm("", "葛葉 / Kuzuha Channel")).toBe("葛葉 Kuzuha");
+    expect(clipSearchTerm("Ch", "Pekora Ch. 兎田ぺこら")).toBe("Pekora 兎田ぺこら");
+    expect(clipSearchTerm("ra", "Pekora Ch. 兎田ぺこら")).toBe("Pekora 兎田ぺこら");
+    expect(clipSearchTerm("兎田ぺこら", "兎田ぺこらちゃんねる")).toBe("兎田ぺこら");
+  });
+
+  it("プリセットのチャンネルはプリセットの名前を使う", () => {
+    expect(clipSearchTerm("なんでも", "Pekora Ch. 兎田ぺこら", "兎田ぺこら")).toBe("兎田ぺこら");
   });
 });

@@ -4,7 +4,8 @@ import { demoClips } from "@/lib/server/demo";
 import { getHolodexClips } from "@/lib/server/holodex";
 import { providerStatus } from "@/lib/server/providers";
 import { getTwitchClips } from "@/lib/server/twitch";
-import { searchYouTubeClips, videoViewCounts } from "@/lib/server/youtube";
+import { rateLimit } from "@/lib/server/rateLimit";
+import { searchYouTubeClips } from "@/lib/server/youtube";
 import {
   CLIP_PERIOD_MS,
   isClipPeriod,
@@ -12,6 +13,7 @@ import {
   YOUTUBE_CHANNEL_ID_RE,
   type ChannelError,
   type Clip,
+  type ClipPeriod,
   type ClipRow,
   type ClipsResponse,
   type ProviderStatus,
@@ -21,25 +23,21 @@ import {
 async function youtubeClips(
   providers: ProviderStatus,
   talent: { name: string; youtubeChannelId: string },
-): Promise<ClipRow[]> {
+  period: ClipPeriod,
+): Promise<{ rows: ClipRow[]; truncated: boolean }> {
   let holodexError: unknown;
   if (providers.holodex) {
     try {
-      const rows = await getHolodexClips(talent.youtubeChannelId);
-      // Holodex は再生数を持っていないので、YouTube のキーがあれば付ける（50本で1ユニット）
-      if (rows.length > 0 && providers.youtube) {
-        const views = await videoViewCounts(rows.map((r) => r.source.slice(3)));
-        return rows.map((r) => ({ ...r, viewCount: views.get(r.source.slice(3)) }));
-      }
+      const result = await getHolodexClips(talent.youtubeChannelId, period);
       // Holodex が追跡していないチャンネルは空になるので、YouTube 検索に回す
-      if (rows.length > 0 || !providers.youtube) return rows;
+      if (result.rows.length > 0 || !providers.youtube) return result;
     } catch (e) {
       if (!providers.youtube) throw e;
       holodexError = e;
     }
   }
   try {
-    return await searchYouTubeClips(talent);
+    return { rows: await searchYouTubeClips(talent, period), truncated: false };
   } catch (e) {
     throw holodexError ? new Error(`${errorMessage(holodexError)} / ${errorMessage(e)}`) : e;
   }
@@ -47,6 +45,8 @@ async function youtubeClips(
 
 /** GET /api/clips?id=talentId&name=名前&yt=UCxxx&tw=login&period=7d */
 export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "clips", 120);
+  if (limited) return limited;
   const params = request.nextUrl.searchParams;
   const id = params.get("id")?.slice(0, 80) ?? "";
   const name = params.get("name")?.trim().slice(0, 60) ?? "";
@@ -63,6 +63,7 @@ export async function GET(request: NextRequest) {
 
   const rows: ClipRow[] = [];
   const errors: ChannelError[] = [];
+  let truncated = false;
   const attempt = async (channel: string, fn: () => Promise<ClipRow[]>) => {
     try {
       rows.push(...(await fn()));
@@ -74,7 +75,13 @@ export async function GET(request: NextRequest) {
   const tasks: Promise<void>[] = [];
   if (youtubeChannelId) {
     if (providers.holodex || providers.youtube) {
-      tasks.push(attempt(`yt:${youtubeChannelId}`, () => youtubeClips(providers, { name, youtubeChannelId })));
+      tasks.push(
+        attempt(`yt:${youtubeChannelId}`, async () => {
+          const result = await youtubeClips(providers, { name, youtubeChannelId }, period);
+          truncated ||= result.truncated;
+          return result.rows;
+        }),
+      );
     } else {
       rows.push(...demoClips({ id, name }, "youtube", CLIP_PERIOD_MS[period]));
     }
@@ -90,7 +97,7 @@ export async function GET(request: NextRequest) {
     .filter((c) => Date.parse(c.publishedAt) >= cutoff)
     .map((c) => ({ ...c, talentId: id }));
 
-  const body: ClipsResponse = { clips, errors, providers };
+  const body: ClipsResponse = { clips, errors, providers, truncated };
   return NextResponse.json(body, {
     headers: {
       // 失敗を含む結果を CDN に長く残さない

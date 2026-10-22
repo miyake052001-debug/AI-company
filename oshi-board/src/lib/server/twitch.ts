@@ -1,6 +1,6 @@
 import "server-only";
 import { CLIP_PERIOD_MS, type ChannelError, type ClipPeriod, type ClipRow, type Stream } from "@/lib/types";
-import { cached, chunk, errorMessage, mapLimit, peek, put } from "./cache";
+import { cached, chunk, errorMessage, hasFreshFailure, mapLimit, peek, put, takeBudget } from "./cache";
 
 /*
  * Twitch Helix API（アプリアクセストークン = client credentials）
@@ -13,6 +13,11 @@ const HELIX = "https://api.twitch.tv/helix";
 const SCHEDULE_AHEAD_MS = 7 * 24 * 60 * 60 * 1000;
 /** 1リクエストで新しく取りに行く予定の数。残りは次回以降のポーリングで埋まる（レート制限対策） */
 const SCHEDULE_FETCHES_PER_REQUEST = 25;
+/**
+ * 予定の取得は全体でも1分あたりこの回数まで。Twitch のアプリ枠は1分800ポイントなので、
+ * 配信中チェック（/users・/streams）の分を必ず残す。
+ */
+const SCHEDULE_FETCHES_PER_MINUTE = 200;
 
 export function twitchEnabled(): boolean {
   return !!(process.env.TWITCH_CLIENT_ID && process.env.TWITCH_CLIENT_SECRET);
@@ -194,7 +199,12 @@ interface Schedule {
 }
 
 async function schedule(user: TwitchUser): Promise<Schedule> {
-  return cached<Schedule>(`tw:schedule:${user.id}`, { ttl: 30 * 60_000, errorTtl: 5 * 60_000 }, async () => {
+  const errorTtl = (e: unknown) =>
+    // レート制限中のエラーは制限が解けるまでだけ覚える（5分も予定が消えないように）
+    e instanceof HelixError && e.status === 429
+      ? Math.max(5_000, (g.__oshiTwitchBackoffUntil ?? 0) - Date.now() + 5_000)
+      : 5 * 60_000;
+  return cached<Schedule>(`tw:schedule:${user.id}`, { ttl: 30 * 60_000, errorTtl, staleOnError: true }, async () => {
     try {
       const data = await helix<{ data: { segments: ScheduleSegment[] | null; vacation: Schedule["vacation"] } }>(
         "schedule",
@@ -234,12 +244,16 @@ export async function getTwitchStreams(logins: string[]): Promise<{ streams: Str
   const streams: Stream[] = [];
   for (const [login, s] of live) streams.push(liveToStream(s, users.get(login)?.avatarUrl));
 
-  // 予定はキャッシュ済みのものを全部使い、未取得のものは1リクエストあたり上限まで取りに行く
+  // 予定はキャッシュ済みのもの（失敗を覚えているものを含む）は全部使い、
+  // 未取得のものは1リクエストあたり・1分あたりの上限まで取りに行く
   let budget = SCHEDULE_FETCHES_PER_REQUEST;
   const targets = [...users.values()].filter((u) => {
     if (live.has(u.login)) return false; // 配信中なら次回予定は出さない
-    if (peek(`tw:schedule:${u.id}`) !== undefined) return true;
-    return budget-- > 0;
+    const key = `tw:schedule:${u.id}`;
+    if (peek(key) !== undefined || hasFreshFailure(key)) return true;
+    if (budget <= 0 || !takeBudget("tw:schedule-fetch", SCHEDULE_FETCHES_PER_MINUTE, 60_000)) return false;
+    budget--;
+    return true;
   });
 
   const now = Date.now();

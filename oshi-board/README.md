@@ -37,7 +37,7 @@ npm run dev                  # http://localhost:3000
 
 無料枠は 1日 10,000 ユニット。このアプリは配信状況の判定を RSS（無料）＋ `videos.list`（50本で1ユニット）で行うので、数十チャンネルを2分ごとに更新しても枠内に収まります。
 
-重いのは Holodex を使わない場合の切り抜き検索（`search.list`、1日100回程度が上限）です。チャンネルごとに直近30日を1回だけ検索して6時間キャッシュし、1日の検索回数も `YOUTUBE_SEARCH_DAILY_LIMIT`（既定 80）で制限しています。上限に達したら前回の結果を表示します。切り抜きをたくさん見るなら Holodex のキーを入れるのがおすすめです。
+重いのは Holodex を使わない場合の切り抜き検索（`search.list`、1日100回程度が上限）です。チャンネル×期間ごとに検索結果をキャッシュし（24時間=新着順で3時間、1週間・1ヶ月=再生数順で12〜24時間）、1日の検索回数も `YOUTUBE_SEARCH_DAILY_LIMIT`（既定 80）で制限しています。上限に達したら前回の結果を表示します。切り抜きをたくさん見るなら Holodex のキーを入れるのがおすすめです。
 
 ### Twitch（`TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`）
 
@@ -70,7 +70,7 @@ Twitch の埋め込みは HTTPS のページでしか動かないので、本番
   └─ /api/resolve（@ハンドル・URL → チャンネルID）, /api/meta（貼り付け動画のタイトル）
 ```
 
-- サーバー側はプロセス内キャッシュ（`src/lib/server/cache.ts`）＋ CDN 向け `Cache-Control` でクォータを節約しています。存在しないチャンネルなどの失敗もキャッシュし、外部から叩ける高コストな呼び出しには回数上限をかけています。
+- サーバー側はプロセス内キャッシュ（`src/lib/server/cache.ts`）＋ CDN 向け `Cache-Control` でクォータを節約しています。存在しないチャンネルなどの失敗もキャッシュし、外部から叩ける高コストな呼び出しには回数上限を、API ルートには IP ごとの簡易レート制限（`src/lib/server/rateLimit.ts`）をかけています。
 - マルチビューは iframe を DOM 上で動かすと再読み込みされるので、描画順は固定して位置（absolute）だけを変えています（`src/components/multi/MultiView.tsx`）。
 - Next.js 16 の Cache Components では、別ページに移っても前のページが非表示のまま残ります（React の Activity）。iframe は非表示でも音が鳴り続けるので、マルチビューと切り抜きプレイヤーは非表示になったら iframe を外しています（戻ると読み込み直します）。
 

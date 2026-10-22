@@ -20,7 +20,10 @@ interface Failure {
 }
 
 const MAX_PER_FAMILY = 3000;
+/** 件数が多くなる種類だけ上限を広げる（動画ごとの情報など。1件あたり数百バイト） */
+const FAMILY_LIMITS: Record<string, number> = { "yt:video": 20_000, "yt:views": 30_000 };
 const MAX_FAILURES = 3000;
+const MAX_BUDGETS = 10_000;
 
 const g = globalThis as typeof globalThis & {
   __oshiCache?: Map<string, Map<string, Entry>>;
@@ -69,7 +72,13 @@ export function put<T>(key: string, value: T, ttlMs: number): void {
   const family = familyOf(key);
   family.delete(key);
   family.set(key, { value, expires: Date.now() + ttlMs });
-  evict(family, MAX_PER_FAMILY);
+  evict(family, FAMILY_LIMITS[key.split(":", 2).join(":")] ?? MAX_PER_FAMILY);
+}
+
+/** 失敗を覚えている最中か（その間 cached() は API を呼ばずにエラーを返す） */
+export function hasFreshFailure(key: string): boolean {
+  const failure = failures.get(key);
+  return !!failure && failure.expires > Date.now();
 }
 
 export interface CacheOptions<T> {
@@ -130,7 +139,13 @@ export function takeBudget(name: string, limit: number, windowMs: number, offset
   const window = Math.floor((Date.now() + offsetMs) / windowMs);
   const current = budgets.get(name);
   if (!current || current.window !== window) {
+    budgets.delete(name);
     budgets.set(name, { window, used: 1 });
+    // IPごとの制限などで名前が増え続けないよう、古い順に捨てる
+    for (const k of budgets.keys()) {
+      if (budgets.size <= MAX_BUDGETS) break;
+      budgets.delete(k);
+    }
     return limit >= 1;
   }
   if (current.used >= limit) return false;

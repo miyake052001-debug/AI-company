@@ -41,6 +41,8 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
       const nameBlank = !name.trim();
       const ytChanged = yt !== (initial?.youtubeChannelId ?? "");
       const twChanged = tw.toLowerCase() !== (initial?.twitchLogin ?? "");
+      // YouTube を外したら、残った Twitch からアイコンを取り直す
+      const ytRemoved = !yt && !!initial?.youtubeChannelId;
 
       let youtubeChannelId: string | undefined;
       let twitchLogin: string | undefined;
@@ -57,7 +59,9 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
         }
       }
       if (tw) {
-        if (!twChanged && !nameBlank && TWITCH_LOGIN_RE.test(tw.toLowerCase())) twitchLogin = tw.toLowerCase();
+        if (!twChanged && !nameBlank && !ytRemoved && TWITCH_LOGIN_RE.test(tw.toLowerCase())) {
+          twitchLogin = tw.toLowerCase();
+        }
         else {
           const r = await resolve("twitch", tw);
           twitchLogin = r.id;
@@ -71,15 +75,16 @@ export function TalentForm({ initial, onSave, onCancel }: Props) {
         setError("チャンネル名を取得できませんでした。名前を入力してください");
         return;
       }
-      // チャンネルを変えたらアイコンも取り直す。お気に入りは編集フォームでは触らない（一覧側の最新値を残す）
-      const channelChanged = (yt && ytChanged) || (tw && twChanged) || (!yt && !!initial?.youtubeChannelId) || (!tw && !!initial?.twitchLogin);
+      // アイコンは YouTube を優先。元のアイコンのチャンネルが変わっていなければそのまま残す。
+      // お気に入りは編集フォームでは触らない（一覧側の最新値を残す）
+      const keepAvatar = !!initial && ((yt && !ytChanged) || (!yt && tw && !twChanged && !ytRemoved));
       onSave({
         id: initial?.id ?? newId("t"),
         name: finalName,
         group: group.trim() || undefined,
         youtubeChannelId,
         twitchLogin,
-        avatarUrl: channelChanged || !initial ? resolvedAvatar : (initial.avatarUrl ?? resolvedAvatar),
+        avatarUrl: keepAvatar ? (initial?.avatarUrl ?? resolvedAvatar) : resolvedAvatar,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

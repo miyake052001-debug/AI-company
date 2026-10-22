@@ -54,8 +54,11 @@ export function PlayerTile(props: Props) {
   const url = embedUrl(source, { host, muted: item.startMuted });
   const external = watchUrl(source);
   const platform = source.kind === "yt" ? "youtube" : source.kind === "demo" ? null : "twitch";
-  // 小さい枠（スマホのサブ枠など）では補助ボタンを隠して、閉じるボタンが押せるようにする
-  const compact = rect.w < 280;
+  // ツールバーが枠に収まらないとき（スマホのサブ枠など）は補助ボタンを隠して、閉じるボタンが押せるようにする
+  const moveButtons = focusMode ? (index > 0 ? 1 : 0) : total > 1 ? Number(index > 0) + Number(index < total - 1) : 0;
+  const buttons = moveButtons + Number(hasChat) + Number(!!url) + Number(!!external) + 1;
+  // 余白・アイコン・最小限のラベルで約70px、ボタン1つ22px
+  const compact = rect.w < 70 + buttons * 22;
 
   return (
     <div

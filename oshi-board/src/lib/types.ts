@@ -77,6 +77,8 @@ export interface ClipsResponse {
   clips: Clip[];
   errors: ChannelError[];
   providers: ProviderStatus;
+  /** 件数が多く、期間の途中までしか取得できなかった */
+  truncated?: boolean;
 }
 
 export interface ResolveResponse {
