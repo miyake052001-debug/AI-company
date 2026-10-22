@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0c10;
+  --color-panel: #14161c;
+  --color-panel-2: #1c1f28;
+  --color-line: #272b36;
+  --color-muted: #8d93a3;
+  --color-accent: #ff5fa2;
+  --color-accent-strong: #ff3d8b;
+  --color-yt: #ff0033;
+  --color-tw: #9146ff;
+  --color-live: #ff3b4f;
+  --font-sans:
+    "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, system-ui, sans-serif;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: #e8eaf0;
+  font-family: var(--font-sans);
+}
+
+/* 横スクロールのチップ列でスクロールバーを隠す */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-dot {
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
