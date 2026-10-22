@@ -57,10 +57,17 @@ npm run dev                  # http://localhost:3000
 
 Twitch の埋め込みは HTTPS のページでしか動かないので、本番は必ず HTTPS で配信してください（Vercel なら自動）。
 
-自分のサーバーで動かす場合は、nginx などのプロキシを前に置いてください。API の IP ごとの回数制限は、既定では `X-Forwarded-For` の右端（直前のプロキシが付けた接続元）を使います。プロキシ構成に合わせて次の環境変数で変えられます（プロキシなしで `next start` するとクライアントが偽装できます）。
+API には IP ごとの簡易レート制限があります。接続元IPの取り方は次のとおりです（`src/lib/server/rateLimit.ts`）。
 
-- `TRUSTED_IP_HEADER`: プロキシが必ず上書きするヘッダー名（例: nginx で `proxy_set_header X-Real-IP $remote_addr;` としているなら `x-real-ip`、Cloudflare なら `cf-connecting-ip`）
-- `TRUST_PROXY_HOPS`: 手前に並んでいるプロキシの数（CDN → nginx なら `2`。既定 `1`）
+- **Vercel**: 設定不要。ただし Cloudflare などを Vercel の前に置く場合は `TRUSTED_IP_HEADER=cf-connecting-ip` を設定してください（しないと全員が同じIPに見えます）。
+- **自分のサーバー**: nginx などのプロキシを前に置き、接続元を渡してください。nginx なら次の2行です。
+  ```nginx
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Real-IP $remote_addr;
+  ```
+  - `TRUSTED_IP_HEADER`: プロキシが必ず上書きするヘッダー名を指定すると、それを最優先で使います（例: `x-real-ip`、Cloudflare なら `cf-connecting-ip`）
+  - `TRUST_PROXY_HOPS`: 手前に並んでいるプロキシの数（CDN → nginx なら `2`。既定 `1`）
+  - プロキシなしで `next start` すると、クライアントが `X-Forwarded-For` を偽装して制限をすり抜けられます（API の利用枠自体はサーバー全体の上限で守っています）
 
 ## 仕組み
 

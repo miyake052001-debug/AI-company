@@ -19,6 +19,27 @@ describe("clientIp", () => {
     expect(clientIp(new Headers({ "x-vercel-forwarded-for": "9.9.9.9", "x-forwarded-for": "6.6.6.6" }))).toBe("9.9.9.9");
   });
 
+  it("X-Forwarded-For を付けない nginx（Next が nginx のアドレスを入れる）では nginx の X-Real-IP を使う", () => {
+    vi.stubEnv("VERCEL", "");
+    expect(clientIp(new Headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "127.0.0.1" }))).toBe("203.0.113.7");
+    expect(clientIp(new Headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "::ffff:172.18.0.2" }))).toBe(
+      "203.0.113.7",
+    );
+  });
+
+  it("X-Forwarded-For を上書きするプロキシ（Caddy など）では、偽装された X-Real-IP を使わない", () => {
+    vi.stubEnv("VERCEL", "");
+    expect(clientIp(new Headers({ "x-real-ip": "6.6.6.6", "x-forwarded-for": "203.0.113.7" }))).toBe("203.0.113.7");
+  });
+
+  it("Vercel の前に Cloudflare を置いた場合は TRUSTED_IP_HEADER が優先される", () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("TRUSTED_IP_HEADER", "cf-connecting-ip");
+    const a = clientIp(new Headers({ "cf-connecting-ip": "198.51.100.1", "x-vercel-forwarded-for": "172.68.1.1" }));
+    const b = clientIp(new Headers({ "cf-connecting-ip": "198.51.100.2", "x-vercel-forwarded-for": "172.68.1.1" }));
+    expect([a, b]).toEqual(["198.51.100.1", "198.51.100.2"]);
+  });
+
   it("TRUSTED_IP_HEADER / TRUST_PROXY_HOPS で自前のプロキシ構成に合わせられる", () => {
     vi.stubEnv("VERCEL", "");
     vi.stubEnv("TRUSTED_IP_HEADER", "X-Real-IP");
