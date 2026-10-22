@@ -6,12 +6,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * 外部APIのクォータを第三者に使い切られないための追加の防御で、通常の画面操作では引っかからない回数にしている。
  * クォータ自体はサーバー全体の上限（cache.ts の takeBudget）で守っているので、こちらは多少すり抜けられても致命的ではない。
  *
- * 接続元IPはクライアントが書き換えられない値から取る（上から順に）:
- *   1. TRUSTED_IP_HEADER に指定したヘッダー（例: Cloudflare なら cf-connecting-ip。Vercel の前に置いた場合も）
- *   2. Vercel 上なら、Vercel が上書きする x-vercel-forwarded-for / x-real-ip
- *   3. X-Forwarded-For の右から TRUST_PROXY_HOPS 番目（既定 1 = 直前のプロキシが付けた値）。
- *      それがローカル/プライベートアドレスなら、手前のプロキシ（nginx など）が X-Forwarded-For を付けていないので
- *      プロキシが設定した X-Real-IP を使う
+ * 接続元IPは、クライアントが書き換えられない値だけを使う（推測はしない）:
+ *   - Vercel 上: Vercel が上書きする x-vercel-forwarded-for / x-real-ip のみ。
+ *     （TRUSTED_IP_HEADER は使わない。*.vercel.app に直接アクセスされると偽装できるため）
+ *   - 自前のサーバー: TRUSTED_IP_HEADER に指定したヘッダー（プロキシが必ず上書きするもの）、
+ *     未指定なら X-Forwarded-For の右から TRUST_PROXY_HOPS 番目（既定 1 = 直前のプロキシが付けた値）
  * プロキシなしで next start している場合はクライアントが X-Forwarded-For を偽装できる。
  */
 
@@ -63,15 +62,17 @@ function isLocalAddress(ip: string): boolean {
   return /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0:0:0:0::\/64$|f[cd][0-9a-f]{0,2}:|fe80:)/.test(ip);
 }
 
+let warnedLocal = false;
+
 export function clientIp(headers: Headers): string {
-  const trustedHeader = process.env.TRUSTED_IP_HEADER?.trim().toLowerCase();
-  if (trustedHeader) {
-    const value = headers.get(trustedHeader);
-    if (value) return normalizeIp(value.split(",")[0]);
-  }
   if (process.env.VERCEL) {
     const vercel = headers.get("x-vercel-forwarded-for") ?? headers.get("x-real-ip");
     if (vercel) return normalizeIp(vercel.split(",")[0]);
+  }
+  const trustedHeader = process.env.VERCEL ? undefined : process.env.TRUSTED_IP_HEADER?.trim().toLowerCase();
+  if (trustedHeader) {
+    const value = headers.get(trustedHeader);
+    if (value) return normalizeIp(value.split(",")[0]);
   }
   const forwarded = (headers.get("x-forwarded-for") ?? "")
     .split(",")
@@ -79,8 +80,13 @@ export function clientIp(headers: Headers): string {
     .filter(Boolean);
   const hops = Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1);
   const ip = normalizeIp(forwarded[Math.max(0, forwarded.length - hops)] ?? "unknown");
-  const realIp = headers.get("x-real-ip");
-  if ((ip === "unknown" || isLocalAddress(ip)) && realIp) return normalizeIp(realIp.split(",")[0]);
+  if (!warnedLocal && !trustedHeader && (ip === "unknown" || isLocalAddress(ip))) {
+    // 全員がプロキシのアドレスに見えている（プロキシが X-Forwarded-For を付けていない）可能性が高い
+    warnedLocal = true;
+    console.warn(
+      `[oshi-board] 接続元IPが ${ip} と判定されました。プロキシで X-Forwarded-For を付けるか、TRUSTED_IP_HEADER を設定してください（README の「デプロイ」参照）。`,
+    );
+  }
   return ip;
 }
 

@@ -42,6 +42,7 @@ const FREE_CHAT_RE = /フリー\s*チャット|free\s*chat|freechat|フリチャ
 /** RSS が使えないときの uploads プレイリスト取得（1ユニット）の上限。存在しないIDを大量に送られても枯渇しないように */
 const PLAYLIST_FALLBACK_PER_HOUR = 300;
 const SEARCH_BUDGET = "yt:search";
+const RESOLVE_PER_HOUR = 200;
 
 export function youtubeEnabled(): boolean {
   return !!process.env.YOUTUBE_API_KEY;
@@ -524,8 +525,17 @@ async function scrapeChannelPage(url: string): Promise<ResolvedYouTubeChannel | 
   return { channelId: id, name: name ? decodeEntities(name) : undefined, avatarUrl: avatar };
 }
 
+/** 入力ごとに1時間キャッシュ（同じURLを何度も解決しない） */
 export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouTubeChannel | null> {
   const raw = input.trim();
+  return cached<ResolvedYouTubeChannel | null>(
+    `yt:resolve:${raw.toLowerCase()}`,
+    { ttl: (r) => (r ? HOUR : 5 * 60_000), errorTtl: 60_000 },
+    () => resolveUncached(raw),
+  );
+}
+
+async function resolveUncached(raw: string): Promise<ResolvedYouTubeChannel | null> {
   const idMatch = /(UC[\w-]{22})/.exec(raw);
   const legacyMatch = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
   let legacy: { kind: string; name: string } | undefined;
@@ -545,7 +555,8 @@ export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouT
     }
   }
 
-  if (youtubeEnabled()) {
+  // channels.list は1回1ユニット。外部から好きな入力で叩けるので1時間あたりの上限を設け、超えたらページ読み取りで代替
+  if (youtubeEnabled() && takeBudget("yt:resolve", RESOLVE_PER_HOUR, HOUR)) {
     const params: Record<string, string> | null = idMatch
       ? { part: "snippet", id: idMatch[1] }
       : handle
