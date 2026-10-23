@@ -150,9 +150,9 @@ const STALE_ACTIVE_MS = 15 * 60_000;
  * 動画情報をキャッシュしておく時間。状態が変わりうるものだけ短くする。
  *   - 配信中: 90秒（視聴者数・終了を拾う）
  *   - 予定: 開始が近いほど短く（最短90秒・最長30分）。フリーチャット枠は6時間
- *   - 終了済み・通常の動画: 6時間
+ *   - 終了済み・通常の動画: 3〜4.5日（状態はもう変わらない。まとめて取り込んだ分が同時に切れないようにばらす）
  */
-export function videoTtl(info: VideoInfo, now: number): number {
+export function videoTtl(info: VideoInfo, now: number, jitter = Math.random()): number {
   if (info.kind === "live") return 90_000;
   if (info.kind === "upcoming") {
     if (FREE_CHAT_RE.test(info.title)) return 6 * HOUR;
@@ -160,11 +160,19 @@ export function videoTtl(info: VideoInfo, now: number): number {
     if (Number.isNaN(start)) return 90_000;
     return Math.min(30 * 60_000, Math.max(90_000, (start - now) / 4));
   }
-  return 6 * HOUR;
+  return 72 * HOUR * (1 + jitter / 2);
 }
 
-/** 動画情報の問い合わせ（videos.list・50本で1ユニット）の1時間あたりの上限。フォローが非常に多い人がいても1日の枠を超えないように */
-const VIDEO_BATCHES_PER_HOUR = 250;
+/** 終了済み・通常の動画（状態が変わらないので、期限が切れても問い合わせ直さない） */
+const isSettled = (v: VideoInfo) => v.kind === "ended" || v.kind === "video";
+
+/**
+ * 動画情報の問い合わせ（videos.list・50本で1ユニット）の1時間あたりの上限（1日の枠 10,000 の7割強）。
+ * そのうち初めて見る動画の問い合わせは NEW_VIDEO_BATCHES_PER_HOUR まで。
+ * フォローの多い人が初めて開いても（1000チャンネルで約200回）、表示中のライブ・予定の更新に必ず枠が残るようにする。
+ */
+const VIDEO_BATCHES_PER_HOUR = 300;
+const NEW_VIDEO_BATCHES_PER_HOUR = 200;
 
 export function toVideoInfo(item: YtVideoItem): VideoInfo | null {
   const sn = item.snippet;
@@ -263,19 +271,40 @@ async function recentVideoIds(channelId: string): Promise<string[]> {
 }
 
 /**
- * 動画詳細をまとめて取得。ライブ/予定以外は状態が変わらないので長めにキャッシュする。
+ * 動画詳細をまとめて取得。ライブ/予定以外は状態が変わらないので長めにキャッシュし、期限が切れても問い合わせ直さない。
+ * 期限の切れたライブ・予定（いま表示しているもの）を先に、初めて見る動画をあとに問い合わせる。
  * 一部のバッチが失敗しても、残りと（期限切れでも）前回の値で返す。
  */
 async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoInfo>; errors: string[] }> {
   const videos = new Map<string, VideoInfo>();
   const errors: string[] = [];
-  const missing: string[] = [];
+  const refresh: string[] = [];
+  const unseen = new Set<string>();
   for (const id of new Set(ids)) {
     const hit = peek<VideoInfo | null>(`yt:video:${id}`);
-    if (hit === undefined) missing.push(id);
-    else if (hit) videos.set(id, hit);
+    if (hit !== undefined) {
+      if (hit) videos.set(id, hit);
+      continue;
+    }
+    const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
+    if (stale && isSettled(stale)) videos.set(id, stale);
+    else if (stale) refresh.push(id);
+    else unseen.add(id);
   }
-  for (const batch of chunk(missing, 50)) {
+
+  let allowUnseen = true;
+  let deferred = false;
+  for (const fullBatch of chunk([...refresh, ...unseen], 50)) {
+    let batch = fullBatch;
+    if (allowUnseen && batch.some((id) => unseen.has(id))) {
+      allowUnseen = takeBudget("yt:videos-new", NEW_VIDEO_BATCHES_PER_HOUR, HOUR);
+    }
+    if (!allowUnseen) {
+      // 初めて見る動画は次回以降に回す（表示中のものの更新を優先）
+      if (batch.some((id) => unseen.has(id))) deferred = true;
+      batch = batch.filter((id) => !unseen.has(id));
+      if (batch.length === 0) continue;
+    }
     try {
       if (!takeBudget("yt:videos", VIDEO_BATCHES_PER_HOUR, HOUR)) {
         throw new LimitError("YouTube の配信情報の取得が混み合っています。しばらくは前回の情報を表示します");
@@ -300,12 +329,13 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
       for (const id of batch) {
         const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
         if (!stale) continue;
-        // 終了済み・通常動画は状態が変わらないので使ってよい。ライブ/予定は最近の値だけ
-        const settled = stale.kind === "ended" || stale.kind === "video";
-        if (settled || Date.now() - (stale.fetchedAt ?? 0) < STALE_ACTIVE_MS) videos.set(id, stale);
+        // ライブ/予定は、本来の期限を過ぎてから STALE_ACTIVE_MS までだけ使う（終了済みを LIVE と出し続けないように）
+        const fetchedAt = stale.fetchedAt ?? 0;
+        if (Date.now() - fetchedAt < videoTtl(stale, fetchedAt) + STALE_ACTIVE_MS) videos.set(id, stale);
       }
     }
   }
+  if (deferred) errors.push("フォローが多いため、一部のチャンネルの配信情報はあとで取得します");
   return { videos, errors };
 }
 

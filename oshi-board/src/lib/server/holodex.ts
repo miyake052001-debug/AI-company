@@ -125,22 +125,23 @@ export async function getHolodexClips(youtubeChannelId: string, period: ClipPeri
 
 /* ---------- 配信中の VTuber（「見つける」タブ） ---------- */
 
+/** Holodex の事務所名 → 表示名。Holodex の表記ゆれ（"VSpo" / "VSPO"、"Nori Pro" / "NoriPro" など）は orgKey でそろえる */
 const ORG_NAMES: Record<string, string> = {
-  Hololive: "ホロライブ",
-  Nijisanji: "にじさんじ",
-  VSPO: "ぶいすぽっ！",
-  Independents: "個人勢",
+  hololive: "ホロライブ",
+  nijisanji: "にじさんじ",
+  vspo: "ぶいすぽっ！",
+  independents: "個人勢",
   "774inc": "ななしいんく",
-  Neoporte: "ネオポルテ",
-  "Aogiri Highschool": "あおぎり高校",
-  "Nori Pro": "のりプロ",
-  NoriPro: "のりプロ",
-  "Neo-Porte": "ネオポルテ",
+  neoporte: "ネオポルテ",
+  aogirihighschool: "あおぎり高校",
+  noripro: "のりプロ",
 };
+
+const orgKey = (org: string) => org.toLowerCase().replace(/[\s_.-]/g, "");
 
 export function orgLabel(org: string | undefined): string | undefined {
   if (!org) return undefined;
-  return ORG_NAMES[org] ?? org;
+  return ORG_NAMES[orgKey(org)] ?? org;
 }
 
 interface HolodexLive {

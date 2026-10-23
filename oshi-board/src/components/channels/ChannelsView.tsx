@@ -69,11 +69,13 @@ export function ChannelsView() {
     return map;
   }, [data]);
 
-  // プリセットの「フォロー済み」はチャンネルで判定する（取り込みや「見つける」で追加した人も含めるため）
+  // プリセットの「フォロー済み」はチャンネルで判定する（取り込みや「見つける」で追加した人も含めるため）。
+  // YouTube と Twitch の両方を持つ人は、両方フォローしていてはじめて済みにする（片方だけなら追加で足せる）
   const index = useTalentIndex(talents);
   const presetFollowed = (t: Talent) =>
-    (!!t.youtubeChannelId && isFollowed(index, { platform: "youtube", id: t.youtubeChannelId })) ||
-    (!!t.twitchLogin && isFollowed(index, { platform: "twitch", id: t.twitchLogin }));
+    (!!t.youtubeChannelId || !!t.twitchLogin) &&
+    (!t.youtubeChannelId || isFollowed(index, { platform: "youtube", id: t.youtubeChannelId })) &&
+    (!t.twitchLogin || isFollowed(index, { platform: "twitch", id: t.twitchLogin }));
   const showFilter = talents.length > 10 || filter !== "";
   const q = showFilter ? filter.trim().toLowerCase() : "";
   const shown = q
@@ -310,7 +312,7 @@ export function ChannelsView() {
                         key={t.id}
                         type="button"
                         disabled={followed}
-                        onClick={() => talentActions.add(t)}
+                        onClick={() => talentActions.addMany([t])}
                         className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${
                           followed ? "border-accent/40 bg-accent/10 text-white/70" : "border-line hover:border-muted/60"
                         }`}

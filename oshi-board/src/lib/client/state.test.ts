@@ -64,4 +64,30 @@ describe("talentActions.addMany", () => {
     expect(added).toBe(1);
     expect(talentsStore.get().map((t) => t.id)).toEqual(["a", "d"]);
   });
+
+  it("片方のチャンネルだけフォロー済みなら、足りないチャンネルをその人に足す", async () => {
+    const { talentActions, talentsStore } = await import("./state");
+    // Twitch のフォロー取り込みで入った人
+    talentsStore.set([{ id: "tw-beni_yakumo", name: "八雲べに", twitchLogin: "beni_yakumo", favorite: true }]);
+    const added = talentActions.addMany([
+      { id: "vspo-beni", name: "八雲べに", group: "ぶいすぽっ！", youtubeChannelId: "UCjXBuHmWkieBApgBhDuJMMQ", twitchLogin: "beni_yakumo" },
+    ]);
+    expect(added).toBe(1);
+    expect(talentsStore.get()).toEqual([
+      { id: "tw-beni_yakumo", name: "八雲べに", twitchLogin: "beni_yakumo", favorite: true, youtubeChannelId: "UCjXBuHmWkieBApgBhDuJMMQ", avatarUrl: undefined },
+    ]);
+    // もう一度追加しても増えない
+    expect(talentActions.addMany([{ id: "vspo-beni", name: "八雲べに", youtubeChannelId: "UCjXBuHmWkieBApgBhDuJMMQ", twitchLogin: "beni_yakumo" }])).toBe(0);
+  });
+
+  it("足す先の人がその種類のチャンネルを別に持っていれば、新しいチャンネルだけの人として追加する", async () => {
+    const { talentActions, talentsStore } = await import("./state");
+    talentsStore.set([{ id: "x", name: "X", twitchLogin: "shared", youtubeChannelId: "UCaaaaaaaaaaaaaaaaaaaaaa" }]);
+    const added = talentActions.addMany([{ id: "y", name: "Y", twitchLogin: "shared", youtubeChannelId: "UCbbbbbbbbbbbbbbbbbbbbbb" }]);
+    expect(added).toBe(1);
+    expect(talentsStore.get().map((t) => [t.id, t.youtubeChannelId, t.twitchLogin])).toEqual([
+      ["x", "UCaaaaaaaaaaaaaaaaaaaaaa", "shared"],
+      ["y", "UCbbbbbbbbbbbbbbbbbbbbbb", undefined],
+    ]);
+  });
 });

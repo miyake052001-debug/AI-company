@@ -32,6 +32,12 @@ describe("holodexLiveToStream", () => {
 
   it("事務所名は日本語にし、知らないものはそのまま", () => {
     expect(orgLabel("Nijisanji")).toBe("にじさんじ");
+    // Holodex の表記ゆれ
+    expect(orgLabel("VSpo")).toBe("ぶいすぽっ！");
+    expect(orgLabel("VSPO")).toBe("ぶいすぽっ！");
+    expect(orgLabel("Nori Pro")).toBe("のりプロ");
+    expect(orgLabel("Neo-Porte")).toBe("ネオポルテ");
+    expect(orgLabel("Aogiri Highschool")).toBe("あおぎり高校");
     expect(orgLabel("Some New Org")).toBe("Some New Org");
     expect(orgLabel(undefined)).toBeUndefined();
   });

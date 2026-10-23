@@ -48,21 +48,63 @@ export const talentActions = {
   add(talent: Talent) {
     talentsStore.set((list) => [...list.filter((t) => t.id !== talent.id), talent]);
   },
-  /** まとめて追加（同じIDや、同じチャンネルをすでにフォローしている人は飛ばす） */
+  /**
+   * まとめて追加（プリセット・JSON の読み込み）。追加した人数（チャンネルを足した人も含む）を返す。
+   *   - 持っているチャンネルがすべてフォロー済みなら飛ばす
+   *   - 一部だけフォロー済みなら、足りないチャンネルをその人（同じIDの人か、フォロー済みのチャンネルを持つ人）に足す
+   *     （例: Twitch だけ取り込んだ人をプリセットから追加すると、YouTube も見るようになる）
+   */
   addMany(talents: Talent[]): number {
     let added = 0;
     talentsStore.set((list) => {
-      const ids = new Set(list.map((t) => t.id));
-      const yt = new Set(list.map((t) => t.youtubeChannelId).filter(Boolean));
-      const tw = new Set(list.map((t) => t.twitchLogin?.toLowerCase()).filter(Boolean));
       const next = [...list];
+      const byId = new Map<string, number>();
+      const byYt = new Map<string, number>();
+      const byTw = new Map<string, number>();
+      const index = (t: Talent, i: number) => {
+        byId.set(t.id, i);
+        if (t.youtubeChannelId) byYt.set(t.youtubeChannelId, i);
+        if (t.twitchLogin) byTw.set(t.twitchLogin.toLowerCase(), i);
+      };
+      next.forEach(index);
       for (const t of talents) {
         const login = t.twitchLogin?.toLowerCase();
-        if (ids.has(t.id) || (t.youtubeChannelId && yt.has(t.youtubeChannelId)) || (login && tw.has(login))) continue;
-        ids.add(t.id);
-        if (t.youtubeChannelId) yt.add(t.youtubeChannelId);
-        if (login) tw.add(login);
-        next.push(t);
+        const ytNew = !!t.youtubeChannelId && !byYt.has(t.youtubeChannelId);
+        const twNew = !!login && !byTw.has(login);
+        if (!ytNew && !twNew) {
+          // チャンネルのない人は、同じIDがなければそのまま追加する
+          if (t.youtubeChannelId || login || byId.has(t.id)) continue;
+          next.push(t);
+          index(t, next.length - 1);
+          added++;
+          continue;
+        }
+        const ownerIndex =
+          byId.get(t.id) ??
+          (t.youtubeChannelId ? byYt.get(t.youtubeChannelId) : undefined) ??
+          (login ? byTw.get(login) : undefined);
+        const owner = ownerIndex === undefined ? undefined : next[ownerIndex];
+        const canMerge = owner && (!ytNew || !owner.youtubeChannelId) && (!twNew || !owner.twitchLogin);
+        if (owner && ownerIndex !== undefined && canMerge) {
+          const merged: Talent = {
+            ...owner,
+            youtubeChannelId: owner.youtubeChannelId ?? (ytNew ? t.youtubeChannelId : undefined),
+            twitchLogin: owner.twitchLogin ?? (twNew ? login : undefined),
+            avatarUrl: owner.avatarUrl ?? t.avatarUrl,
+          };
+          next[ownerIndex] = merged;
+          index(merged, ownerIndex);
+        } else {
+          // フォロー済みのチャンネルは外して、新しいチャンネルだけの人として追加する
+          const fresh: Talent = {
+            ...t,
+            id: byId.has(t.id) ? newId(ytNew ? "yt" : "tw") : t.id,
+            youtubeChannelId: ytNew ? t.youtubeChannelId : undefined,
+            twitchLogin: twNew ? login : undefined,
+          };
+          next.push(fresh);
+          index(fresh, next.length - 1);
+        }
         added++;
       }
       return next;

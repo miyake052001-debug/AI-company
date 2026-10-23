@@ -95,7 +95,9 @@ describe("videoTtl", () => {
   const base = { id: "dQw4w9WgXcQ", channelId: "UC1DCedRgGHBdm81E1llLhOQ", channelTitle: "x", title: "配信" };
   it("配信中は短く、終了済みは長く", () => {
     expect(videoTtl({ ...base, kind: "live" }, NOW)).toBe(90_000);
-    expect(videoTtl({ ...base, kind: "ended" }, NOW)).toBe(6 * 3_600_000);
+    expect(videoTtl({ ...base, kind: "ended" }, NOW, 0)).toBe(72 * 3_600_000);
+    // まとめて取り込んだ分が同時に切れないよう、ばらつかせる
+    expect(videoTtl({ ...base, kind: "video" }, NOW, 1)).toBe(108 * 3_600_000);
   });
   it("予定は開始が近いほど短く、フリーチャット枠は長く", () => {
     const soon = videoTtl({ ...base, kind: "upcoming", startAt: new Date(NOW + 5 * 60_000).toISOString() }, NOW);

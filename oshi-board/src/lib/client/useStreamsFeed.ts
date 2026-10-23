@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { compareStreams } from "@/lib/streams";
 import type { StreamsResponse, Talent } from "@/lib/types";
 
@@ -50,20 +50,42 @@ interface ManyState<T> {
   at?: number;
 }
 
-/**
- * 直近の取得結果（URL の組ごと）。ページを移動して戻ったとき（Activity の再表示）に
- * すぐ取り直さず、前回の結果を表示するために使う。
+/*
+ * 直近の取得結果（URL の組ごと）。同じフォローを表示するページ（配信・フォロー管理・マルチビュー）で共有し、
+ * どのページが取っても、表示中のページはすぐ最新の結果に切り替わる。
+ * ページを移動して戻ったとき（Activity の再表示）は、取ったばかりなら取り直さずにこれを表示する。
  */
-const recent = new Map<string, { at: number; state: ManyState<unknown> }>();
+const recent = new Map<string, { attemptedAt: number; state: ManyState<unknown> }>();
+const recentListeners = new Set<() => void>();
+
+function remember(key: string, state: ManyState<unknown>) {
+  recent.delete(key);
+  recent.set(key, { attemptedAt: Date.now(), state });
+  if (recent.size > 20) recent.delete(recent.keys().next().value!);
+  recentListeners.forEach((l) => l());
+}
+
+function subscribeRecent(listener: () => void) {
+  recentListeners.add(listener);
+  return () => {
+    recentListeners.delete(listener);
+  };
+}
+
 /**
  * 複数の URL をまとめて定期取得する。タブが非表示の間は止めて、表示に戻ったら古ければ取り直す。
  * 一部の URL が失敗しても、その URL の前回の結果を残す。
  */
 export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
   const key = urls && urls.length > 0 ? urls.join("\n") : "";
-  const [state, setState] = useState<ManyState<T> | null>(null);
+  const current = useSyncExternalStore(
+    subscribeRecent,
+    () => (key ? (recent.get(key)?.state as ManyState<T> | undefined) : undefined),
+    () => undefined,
+  );
   const [nonce, setNonce] = useState(0);
-  const lastRun = useRef(0);
+  // 「更新」ボタンのときはブラウザのキャッシュ（stale-while-revalidate）を使わない
+  const forceRef = useRef(false);
 
   useEffect(() => {
     if (!key) return;
@@ -74,46 +96,41 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
     const run = async () => {
       ctrl?.abort();
       const current = (ctrl = new AbortController());
-      lastRun.current = Date.now();
+      const cache: RequestCache = forceRef.current ? "no-cache" : "default";
+      forceRef.current = false;
       const results = await Promise.allSettled(
         list.map(async (url) => {
-          const res = await fetch(url, { signal: current.signal });
+          const res = await fetch(url, { signal: current.signal, cache });
           const json = (await res.json()) as T & { error?: string };
           if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
           return [url, json] as const;
         }),
       );
       if (!alive || current.signal.aborted) return;
-      setState((prevState) => {
-        const remembered = recent.get(key)?.state as ManyState<T> | undefined;
-        const prev = prevState?.key === key ? prevState : remembered;
-        const data: Record<string, T> = prev?.key === key ? { ...prev.data } : {};
-        let error: string | undefined;
-        let anyOk = false;
-        for (const r of results) {
-          if (r.status === "fulfilled") {
-            data[r.value[0]] = r.value[1];
-            anyOk = true;
-          } else {
-            error ??= r.reason instanceof Error ? r.reason.message : String(r.reason);
-          }
+      // 待っている間に別のページが新しい結果を入れていれば、それに重ねる
+      const prev = recent.get(key)?.state as ManyState<T> | undefined;
+      const data: Record<string, T> = { ...prev?.data };
+      let error: string | undefined;
+      let anyOk = false;
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          data[r.value[0]] = r.value[1];
+          anyOk = true;
+        } else {
+          error ??= r.reason instanceof Error ? r.reason.message : String(r.reason);
         }
-        const next: ManyState<T> = { key, data, error, at: anyOk ? Date.now() : prev?.key === key ? prev.at : undefined };
-        recent.set(key, { at: Date.now(), state: next });
-        if (recent.size > 20) recent.delete(recent.keys().next().value!);
-        return next;
-      });
+      }
+      remember(key, { key, data, error, at: anyOk ? Date.now() : prev?.at });
     };
 
-    // 直近に取ったばかりなら（別ページから戻ってきただけなら）すぐには取り直さない
-    const last = recent.get(key);
-    if (last && Date.now() - last.at < intervalMs / 2) lastRun.current = last.at;
-    else void run();
+    // 直近に取ったばかりなら（別ページから戻ってきただけ・別の画面が取ったばかりなら）取り直さない
+    const stale = () => Date.now() - (recent.get(key)?.attemptedAt ?? 0) >= intervalMs / 2;
+    if (stale()) void run();
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void run();
+      if (document.visibilityState === "visible" && stale()) void run();
     }, intervalMs);
     const onVisible = () => {
-      if (document.visibilityState === "visible" && Date.now() - lastRun.current > intervalMs / 2) void run();
+      if (document.visibilityState === "visible" && stale()) void run();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -125,10 +142,12 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
   }, [key, intervalMs, nonce]);
 
   const refresh = useCallback(() => {
-    if (key) recent.delete(key);
+    // 表示中の結果は残したまま、すぐに取り直す
+    const entry = recent.get(key);
+    if (entry) entry.attemptedAt = 0;
+    forceRef.current = true;
     setNonce((n) => n + 1);
   }, [key]);
-  const current = state?.key === key ? state : ((recent.get(key)?.state as ManyState<T> | undefined) ?? null);
   // 取得結果が変わったときだけ新しい配列にする（下流の useMemo を無駄に再計算させない）
   const results = useMemo(
     () => (key && current ? key.split("\n").flatMap((u) => (current.data[u] ? [current.data[u]] : [])) : []),

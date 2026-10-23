@@ -44,14 +44,14 @@ export function DiscoverView() {
   const list = useMemo(() => (tab === "vtuber" ? (data?.vtubers ?? []) : (data?.twitch ?? [])), [data, tab]);
   const pickFacet = (s: Stream) => (tab === "vtuber" ? s.org : s.category);
   const topFacets = useMemo(() => facets(list, (s) => (tab === "vtuber" ? s.org : s.category)), [list, tab]);
-  // 更新で選んだ事務所・ゲームの配信がなくなったら絞り込みを解除する
-  const activeFacet = facet && list.some((s) => (tab === "vtuber" ? s.org : s.category) === facet) ? facet : null;
-  const facetValues = activeFacet && !topFacets.includes(activeFacet) ? [...topFacets, activeFacet] : topFacets;
+  // 更新で選んだ事務所・ゲームの配信がなくなったら絞り込みを解除する（描画中に state を合わせる React の書き方）
+  if (facet !== null && data && !list.some((s) => pickFacet(s) === facet)) setFacet(null);
+  const facetValues = facet && !topFacets.includes(facet) ? [...topFacets, facet] : topFacets;
   const selected = useMemo(() => new Set(multi.map((m) => m.source)), [multi]);
 
   const q = query.trim().toLowerCase();
   const visible = list.filter((s) => {
-    if (activeFacet && pickFacet(s) !== activeFacet) return false;
+    if (facet && pickFacet(s) !== facet) return false;
     if (!q) return true;
     return [s.title, s.channelName, s.category, s.org].some((v) => v?.toLowerCase().includes(q));
   });
@@ -142,11 +142,11 @@ export function DiscoverView() {
 
         {facetValues.length > 0 && (
           <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto">
-            <Chip active={activeFacet === null} onClick={() => setFacet(null)}>
+            <Chip active={facet === null} onClick={() => setFacet(null)}>
               すべて
             </Chip>
             {facetValues.map((v) => (
-              <Chip key={v} active={activeFacet === v} onClick={() => setFacet(activeFacet === v ? null : v)}>
+              <Chip key={v} active={facet === v} onClick={() => setFacet(facet === v ? null : v)}>
                 {v}
               </Chip>
             ))}
