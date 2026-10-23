@@ -181,11 +181,14 @@ const VIDEO_BATCHES_PER_HOUR = 300;
 const COLD_VIDEO_BATCHES_PER_HOUR = 200;
 
 /**
- * 最近ライブ・予定だった動画（古く取得した順）。期限の切れたものを、ほかのリクエストの問い合わせの空き枠
- * （1回50本まで）に相乗りさせて更新する。利用者が多くても、更新の回数がリクエスト数ではなく動画数で決まるように。
+ * 最近ライブ・予定だった動画 → 最後にどこかのリクエストが求めた時刻（並びは古く取得した順）。
+ * 期限の切れたものを、ほかのリクエストの問い合わせの空き枠（1回50本まで）に相乗りさせて更新する。
+ * 利用者が多くても、更新の回数がリクエスト数ではなく動画数で決まるように。
+ * 1時間だれも求めていない動画（フォロー解除・RSS から外れたもの）は相乗りの対象から外す。
  */
-const activeVideos = new Set<string>();
+const activeVideos = new Map<string, number>();
 const MAX_ACTIVE_VIDEOS = 10_000;
+const ACTIVE_UNREQUESTED_MS = 60 * 60_000;
 
 /**
  * 相乗りで更新する対象か。ライブと、2週間以内の予定（予定時刻を過ぎた待機所も含む。
@@ -198,11 +201,12 @@ function isShownActive(info: VideoInfo, now: number): boolean {
   return Number.isNaN(t) || t <= now + UPCOMING_MAX_AHEAD_MS;
 }
 
-function rememberActive(info: VideoInfo, now: number) {
+function rememberActive(info: VideoInfo, now: number, requested: boolean) {
+  const lastAsked = requested ? now : activeVideos.get(info.id);
   activeVideos.delete(info.id);
-  if (isShownActive(info, now)) {
-    activeVideos.add(info.id);
-    if (activeVideos.size > MAX_ACTIVE_VIDEOS) activeVideos.delete(activeVideos.values().next().value!);
+  if (lastAsked !== undefined && isShownActive(info, now)) {
+    activeVideos.set(info.id, lastAsked);
+    if (activeVideos.size > MAX_ACTIVE_VIDEOS) activeVideos.delete(activeVideos.keys().next().value!);
   }
 }
 
@@ -212,12 +216,17 @@ function rememberActive(info: VideoInfo, now: number) {
  */
 function expiredActive(n: number, exclude: Set<string>): string[] {
   const out: string[] = [];
+  const now = Date.now();
   let checked = 0;
-  for (const id of activeVideos) {
+  for (const [id, lastAsked] of activeVideos) {
     if (out.length >= n) break;
     if (exclude.has(id)) continue;
     const key = `yt:video:${id}`;
     if (peek(key) !== undefined) continue;
+    if (now - lastAsked > ACTIVE_UNREQUESTED_MS) {
+      activeVideos.delete(id);
+      continue;
+    }
     if (++checked > 500) break;
     const stale = peekStale<VideoInfo | null>(key);
     if (stale && !isSettled(stale)) out.push(id);
@@ -336,7 +345,10 @@ async function videoDetails(
   const requested = new Set(ids);
   const first: string[] = [];
   const later: string[] = [];
+  const now = Date.now();
   for (const id of requested) {
+    // 求められた時刻だけ更新する（並び順は変えない）
+    if (activeVideos.has(id)) activeVideos.set(id, now);
     const key = `yt:video:${id}`;
     const hit = peek<VideoInfo | null>(key);
     if (hit !== undefined) {
@@ -385,7 +397,7 @@ async function videoDetails(
         found.add(info.id);
         if (requested.has(info.id)) videos.set(info.id, info);
         put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, videoTtl(info, Date.now()));
-        rememberActive(info, Date.now());
+        rememberActive(info, Date.now(), requested.has(info.id));
       }
       // 非公開・削除済みは null をキャッシュして毎回問い合わせない
       for (const id of batch) {

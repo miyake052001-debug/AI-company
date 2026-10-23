@@ -218,6 +218,28 @@ describe("getYouTubeStreams（問い合わせ回数）", () => {
     expect(videoCalls.length).toBe(mid);
   });
 
+  it("1時間だれも見ていない待機所は相乗りで更新しない", async () => {
+    vi.setSystemTime(Date.parse("2026-10-09T00:00:00Z"));
+    const room = addChannels(15, 1, (_, v) => (v === 0 ? "upcoming" : "none"));
+    videos.get(feeds.get(room[0])![0])!.start = "2026-10-08T00:00:00Z";
+    await getYouTubeStreams(room);
+    const a = addChannels(16, 1, (_, v) => (v === 0 ? "live" : "none"));
+    const roomId = videoId(15, 0, 0);
+    // 待機所をフォローしていた人はもう来ない。a の人だけが2分ごとに見る
+    let firstHour = 0;
+    let secondHour = 0;
+    for (let m = 0; m <= 120; m += 2) {
+      vi.setSystemTime(Date.parse("2026-10-09T00:00:00Z") + m * 60_000);
+      const before = videoCalls.length;
+      await getYouTubeStreams(a);
+      const hits = videoCalls.slice(before).filter((ids) => ids.includes(roomId)).length;
+      if (m < 60) firstHour += hits;
+      else if (m > 62) secondHour += hits;
+    }
+    expect(firstHour).toBeGreaterThan(0);
+    expect(secondHour).toBe(0);
+  });
+
   it("アプリ側の1時間の上限に達したら、枠が戻るまで前回のライブを出し続ける", async () => {
     vi.setSystemTime(Date.parse("2026-10-05T00:00:00Z"));
     const channels = addChannels(8, 1, (_, v) => (v === 0 ? "live" : "none"));
