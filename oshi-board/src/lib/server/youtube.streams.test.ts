@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { takeBudget } from "./cache";
-import { getYouTubeStreams } from "./youtube";
+import type { takeBudget as TakeBudget } from "./cache";
+import type { getYouTubeStreams as GetYouTubeStreams } from "./youtube";
 
 /*
  * getYouTubeStreams を RSS と videos.list のモックで動かして、
@@ -28,7 +28,16 @@ function feed(ids: string[]) {
   return `<feed>${ids.map((id) => `<entry><yt:videoId>${id}</yt:videoId></entry>`).join("")}</feed>`;
 }
 
-beforeEach(() => {
+let getYouTubeStreams: typeof GetYouTubeStreams;
+let takeBudget: typeof TakeBudget;
+
+beforeEach(async () => {
+  // テストごとにキャッシュ・回数制限・相乗りの対象を空にする（モジュールを読み直す）
+  const g = globalThis as Record<string, unknown>;
+  for (const k of ["__oshiCache", "__oshiFailures", "__oshiInflight", "__oshiBudgets", "__oshiYtQuotaUntil"]) delete g[k];
+  vi.resetModules();
+  ({ getYouTubeStreams } = await import("./youtube"));
+  ({ takeBudget } = await import("./cache"));
   videos = new Map();
   feeds = new Map();
   videoCalls = [];
@@ -189,6 +198,24 @@ describe("getYouTubeStreams（問い合わせ回数）", () => {
     const before = videoCalls.length;
     await getYouTubeStreams(a);
     expect(videoCalls.slice(before).flat()).toEqual(expect.arrayContaining([videoId(11, 0, 0), videoId(12, 0, 0)]));
+  });
+
+  it("予定時刻を過ぎたままの待機所も相乗りで更新し、その人のリクエストで毎回問い合わせない", async () => {
+    vi.setSystemTime(Date.parse("2026-10-08T00:00:00Z"));
+    const rooms = addChannels(13, 5, (_, v) => (v === 0 ? "upcoming" : "none"));
+    for (const cid of rooms) videos.get(feeds.get(cid)![0])!.start = "2026-10-07T00:00:00Z";
+    for (const cid of rooms) await getYouTubeStreams([cid]);
+    const a = addChannels(14, 1, (_, v) => (v === 0 ? "live" : "none"));
+    await getYouTubeStreams(a);
+
+    // 11分後: a の問い合わせに待機所も相乗りするので、待機所をフォローしている人の取得では問い合わせない
+    vi.setSystemTime(Date.parse("2026-10-08T00:11:00Z"));
+    const before = videoCalls.length;
+    await getYouTubeStreams(a);
+    expect(videoCalls.slice(before).flat()).toEqual(expect.arrayContaining(rooms.map((_, ch) => videoId(13, ch, 0))));
+    const mid = videoCalls.length;
+    for (const cid of rooms) await getYouTubeStreams([cid]);
+    expect(videoCalls.length).toBe(mid);
   });
 
   it("アプリ側の1時間の上限に達したら、枠が戻るまで前回のライブを出し続ける", async () => {

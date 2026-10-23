@@ -105,5 +105,9 @@ describe("videoTtl", () => {
     expect(soon).toBe(90_000);
     expect(later).toBe(30 * 60_000);
     expect(videoTtl({ ...base, kind: "upcoming", title: "【フリーチャット】", startAt: undefined }, NOW)).toBe(6 * 3_600_000);
+    // 少し遅れている予定はすぐ確かめ直す。6時間以上前の予定のまま残っている待機所は10分
+    expect(videoTtl({ ...base, kind: "upcoming", startAt: new Date(NOW - 10 * 60_000).toISOString() }, NOW)).toBe(90_000);
+    expect(videoTtl({ ...base, kind: "upcoming", startAt: new Date(NOW - 86_400_000).toISOString() }, NOW)).toBe(10 * 60_000);
+    expect(videoTtl({ ...base, kind: "upcoming", startAt: undefined }, NOW)).toBe(10 * 60_000);
   });
 });

@@ -152,7 +152,9 @@ const STALE_ACTIVE_LIMITED_MS = 60 * 60_000;
 /**
  * 動画情報をキャッシュしておく時間。状態が変わりうるものだけ短くする。
  *   - 配信中: 90秒（視聴者数・終了を拾う）
- *   - 予定: 開始が近いほど短く（最短90秒・最長30分）。フリーチャット枠は6時間
+ *   - 予定: 開始が近いほど短く（最短90秒・最長30分）。フリーチャット枠は6時間。
+ *     予定時刻を6時間以上過ぎた（一覧には出ない）待機所や、予定時刻のないものは10分
+
  *   - 終了済み・通常の動画: 3〜4.5日（状態はもう変わらない。まとめて取り込んだ分が同時に切れないようにばらす）
  */
 export function videoTtl(info: VideoInfo, now: number, jitter = Math.random()): number {
@@ -160,7 +162,7 @@ export function videoTtl(info: VideoInfo, now: number, jitter = Math.random()): 
   if (info.kind === "upcoming") {
     if (FREE_CHAT_RE.test(info.title)) return 6 * HOUR;
     const start = info.startAt ? Date.parse(info.startAt) : NaN;
-    if (Number.isNaN(start)) return 90_000;
+    if (Number.isNaN(start) || start < now - UPCOMING_STALE_MS) return 10 * 60_000;
     return Math.min(30 * 60_000, Math.max(90_000, (start - now) / 4));
   }
   return 72 * HOUR * (1 + jitter / 2);
@@ -185,12 +187,15 @@ const COLD_VIDEO_BATCHES_PER_HOUR = 200;
 const activeVideos = new Set<string>();
 const MAX_ACTIVE_VIDEOS = 10_000;
 
-/** 一覧に出しうるライブ・予定か（相乗りで更新する対象。2週間以上先の予定やフリーチャット枠は除く） */
+/**
+ * 相乗りで更新する対象か。ライブと、2週間以内の予定（予定時刻を過ぎた待機所も含む。
+ * 外すと、その人のリクエストが毎回自分の分だけで問い合わせることになる）。フリーチャット枠は除く
+ */
 function isShownActive(info: VideoInfo, now: number): boolean {
   if (info.kind === "live") return true;
   if (info.kind !== "upcoming" || FREE_CHAT_RE.test(info.title)) return false;
   const t = info.startAt ? Date.parse(info.startAt) : NaN;
-  return !Number.isNaN(t) && t <= now + UPCOMING_MAX_AHEAD_MS && t >= now - UPCOMING_STALE_MS;
+  return Number.isNaN(t) || t <= now + UPCOMING_MAX_AHEAD_MS;
 }
 
 function rememberActive(info: VideoInfo, now: number) {
