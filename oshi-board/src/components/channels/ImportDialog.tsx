@@ -41,6 +41,8 @@ export function ImportDialog({ title, candidates, truncated, defaultGroup = "", 
 
   const chosen = candidates.filter((c) => selected.has(keyOf(c)) && !isFollowed(index, c));
   const newCount = candidates.filter((c) => !isFollowed(index, c)).length;
+  // 1000チャンネルを超えると配信を確認しきれない（お気に入り優先で上限まで）。多いほど更新間隔も延びる
+  const totalAfter = talents.length + chosen.length;
 
   const setMany = (list: ImportCandidate[], on: boolean) =>
     setSelected((prev) => {
@@ -131,6 +133,12 @@ export function ImportDialog({ title, candidates, truncated, defaultGroup = "", 
           {visible.length === 0 && <li className="px-4 py-8 text-center text-sm text-muted">該当するチャンネルはありません</li>}
         </ul>
 
+        {totalAfter > 300 && (
+          <p className="border-t border-line px-4 py-2 text-[11px] text-amber-300/90">
+            追加するとフォローが{totalAfter}件になります。フォローが多いほど配信一覧の更新間隔が長くなり、
+            1000件を超えた分はお気に入り以外から確認されなくなります。よく見る人だけを選ぶのがおすすめです。
+          </p>
+        )}
         <div className="flex flex-wrap items-center gap-2 border-t border-line p-3">
           <input
             value={group}

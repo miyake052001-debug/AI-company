@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const limited = rateLimit(request, "auth", 20);
   if (limited) return limited;
   if (!googleLoginEnabled()) {
-    return backToChannels(request, "google", { ok: false, error: "Google ログインが設定されていません" });
+    return backToChannels(request, "google", { ok: false, error: "disabled" });
   }
   return redirectToProvider(request, "google", (state) => {
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");

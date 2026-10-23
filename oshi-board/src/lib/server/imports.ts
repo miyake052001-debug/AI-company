@@ -30,10 +30,23 @@ async function twitchGet<T>(path: string, token: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** このアプリで発行したトークンか（他のアプリのトークンでアプリ側の枠を使わせない） */
+async function validateTwitchToken(token: string): Promise<{ userId: string }> {
+  const res = await fetch("https://id.twitch.tv/oauth2/validate", {
+    cache: "no-store",
+    headers: { Authorization: `OAuth ${token}` },
+  });
+  if (res.status === 401) throw new Error("Twitch のログインの有効期限が切れました。もう一度取り込んでください");
+  if (!res.ok) throw new Error(`Twitch のログインを確認できませんでした（${res.status}）`);
+  const info = (await res.json()) as { client_id?: string; user_id?: string; scopes?: string[] };
+  if (info.client_id !== process.env.TWITCH_CLIENT_ID || !info.user_id || !info.scopes?.includes("user:read:follows")) {
+    throw new Error("このアプリのログインではありません。もう一度取り込んでください");
+  }
+  return { userId: info.user_id };
+}
+
 export async function fetchTwitchFollows(token: string): Promise<ImportResponse> {
-  const me = await twitchGet<{ data: { id: string }[] }>("users", token);
-  const userId = me.data[0]?.id;
-  if (!userId) throw new Error("Twitch のユーザー情報を取得できませんでした");
+  const { userId } = await validateTwitchToken(token);
 
   const follows: { login: string; name: string }[] = [];
   let cursor: string | undefined;
@@ -93,7 +106,26 @@ export async function exchangeGoogleCode(code: string, redirectUri: string): Pro
   return json.access_token;
 }
 
+const YOUTUBE_READONLY = "https://www.googleapis.com/auth/youtube.readonly";
+
+/** このアプリで発行したトークンか（偽のトークンで全体の上限を使わせない） */
+async function validateGoogleToken(token: string): Promise<void> {
+  const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`, {
+    cache: "no-store",
+  });
+  if (res.status === 400 || res.status === 401) {
+    throw new Error("Google のログインの有効期限が切れました。もう一度取り込んでください");
+  }
+  if (!res.ok) throw new Error(`Google のログインを確認できませんでした（${res.status}）`);
+  const info = (await res.json()) as { aud?: string; azp?: string; scope?: string };
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId || (info.aud !== clientId && info.azp !== clientId) || !info.scope?.split(" ").includes(YOUTUBE_READONLY)) {
+    throw new Error("このアプリのログインではありません。もう一度取り込んでください");
+  }
+}
+
 export async function fetchYouTubeSubscriptions(token: string): Promise<ImportResponse> {
+  await validateGoogleToken(token);
   const candidates: ImportCandidate[] = [];
   let pageToken: string | undefined;
   let truncated = false;

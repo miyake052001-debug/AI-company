@@ -22,7 +22,10 @@ export function StreamsView() {
   const index = useTalentIndex(talents);
   const multi = useMulti();
   const now = useNow();
-  const { data, error, loading, refresh, updatedAt } = useStreamsFeed(hydrated ? talents : null, 120_000);
+  const { data, error, loading, refresh, updatedAt, skipped, intervalMs } = useStreamsFeed(
+    hydrated ? talents : null,
+    120_000,
+  );
 
   const [tab, setTab] = useState<StreamStatus>("live");
   const [query, setQuery] = useState("");
@@ -130,11 +133,18 @@ export function StreamsView() {
           <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-200">
             {error && <p>取得に失敗しました: {error}</p>}
             {providerErrors.map((e) => (
-              <p key={e.channel}>
+              <p key={`${e.channel}:${e.message}`}>
                 {e.channel === "youtube" ? "YouTube" : "Twitch"}: {e.message}
               </p>
             ))}
           </div>
+        )}
+        {(skipped > 0 || intervalMs > 120_000) && (
+          <p className="text-xs text-muted">
+            フォローが多いため、
+            {skipped > 0 && `お気に入りを優先して上限（YouTube・Twitch 各1000）までのチャンネルを確認し、${skipped}件は確認していません。`}
+            {intervalMs > 120_000 && `更新は${Math.round(intervalMs / 60_000)}分ごとです。`}
+          </p>
         )}
         {channelErrors.length > 0 && (
           <p className="text-xs text-amber-300/90">

@@ -10,7 +10,7 @@ import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type ChannelError, type Stream,
 
 /** GET /api/streams?yt=UCxxx,UCyyy&tw=login1,login2 */
 export async function GET(request: NextRequest) {
-  const limited = rateLimit(request, "streams", 60);
+  const limited = rateLimit(request, "streams", 240);
   if (limited) return limited;
   const params = request.nextUrl.searchParams;
   const yt = parseList(params.get("yt"), 150).filter((id) => YOUTUBE_CHANNEL_ID_RE.test(id));

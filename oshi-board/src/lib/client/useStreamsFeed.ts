@@ -6,6 +6,20 @@ import type { StreamsResponse, Talent } from "@/lib/types";
 
 /** 1リクエストあたりのチャンネル数（サーバー側の上限 YouTube 150 / Twitch 100 より少なめ） */
 export const STREAMS_CHUNK = 100;
+/** 配信を確認するチャンネル数の上限（お気に入りを優先）。API の1日の枠と更新の速さのため */
+export const MAX_POLLED_CHANNELS = 1000;
+
+/** 確認するチャンネル（お気に入りを先にして上限まで）と、上限で外れた数 */
+export function polledChannels(talents: Talent[]) {
+  const ordered = [...talents.filter((t) => t.favorite), ...talents.filter((t) => !t.favorite)];
+  const yt = [...new Set(ordered.map((t) => t.youtubeChannelId).filter((v): v is string => !!v))];
+  const tw = [...new Set(ordered.map((t) => t.twitchLogin?.toLowerCase()).filter((v): v is string => !!v))];
+  return {
+    yt: yt.slice(0, MAX_POLLED_CHANNELS),
+    tw: tw.slice(0, MAX_POLLED_CHANNELS),
+    skipped: Math.max(0, yt.length - MAX_POLLED_CHANNELS) + Math.max(0, tw.length - MAX_POLLED_CHANNELS),
+  };
+}
 
 /**
  * フォロー中のチャンネルを /api/streams の URL に分割する。
@@ -13,8 +27,9 @@ export const STREAMS_CHUNK = 100;
  * キャッシュが効くよう ID はソートしておく。
  */
 export function streamsUrls(talents: Talent[]): string[] {
-  const yt = [...new Set(talents.map((t) => t.youtubeChannelId).filter((v): v is string => !!v))].sort();
-  const tw = [...new Set(talents.map((t) => t.twitchLogin?.toLowerCase()).filter((v): v is string => !!v))].sort();
+  const polled = polledChannels(talents);
+  const yt = [...polled.yt].sort();
+  const tw = [...polled.tw].sort();
   const urls: string[] = [];
   const chunks = Math.max(Math.ceil(yt.length / STREAMS_CHUNK), Math.ceil(tw.length / STREAMS_CHUNK));
   for (let i = 0; i < chunks; i++) {
@@ -35,6 +50,11 @@ interface ManyState<T> {
   at?: number;
 }
 
+/**
+ * 直近の取得結果（URL の組ごと）。ページを移動して戻ったとき（Activity の再表示）に
+ * すぐ取り直さず、前回の結果を表示するために使う。
+ */
+const recent = new Map<string, { at: number; state: ManyState<unknown> }>();
 /**
  * 複数の URL をまとめて定期取得する。タブが非表示の間は止めて、表示に戻ったら古ければ取り直す。
  * 一部の URL が失敗しても、その URL の前回の結果を残す。
@@ -64,7 +84,9 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
         }),
       );
       if (!alive || current.signal.aborted) return;
-      setState((prev) => {
+      setState((prevState) => {
+        const remembered = recent.get(key)?.state as ManyState<T> | undefined;
+        const prev = prevState?.key === key ? prevState : remembered;
         const data: Record<string, T> = prev?.key === key ? { ...prev.data } : {};
         let error: string | undefined;
         let anyOk = false;
@@ -76,11 +98,17 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
             error ??= r.reason instanceof Error ? r.reason.message : String(r.reason);
           }
         }
-        return { key, data, error, at: anyOk ? Date.now() : prev?.key === key ? prev.at : undefined };
+        const next: ManyState<T> = { key, data, error, at: anyOk ? Date.now() : prev?.key === key ? prev.at : undefined };
+        recent.set(key, { at: Date.now(), state: next });
+        if (recent.size > 20) recent.delete(recent.keys().next().value!);
+        return next;
       });
     };
 
-    void run();
+    // 直近に取ったばかりなら（別ページから戻ってきただけなら）すぐには取り直さない
+    const last = recent.get(key);
+    if (last && Date.now() - last.at < intervalMs / 2) lastRun.current = last.at;
+    else void run();
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") void run();
     }, intervalMs);
@@ -96,8 +124,11 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
     };
   }, [key, intervalMs, nonce]);
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), []);
-  const current = state?.key === key ? state : null;
+  const refresh = useCallback(() => {
+    if (key) recent.delete(key);
+    setNonce((n) => n + 1);
+  }, [key]);
+  const current = state?.key === key ? state : ((recent.get(key)?.state as ManyState<T> | undefined) ?? null);
   // 取得結果が変わったときだけ新しい配列にする（下流の useMemo を無駄に再計算させない）
   const results = useMemo(
     () => (key && current ? key.split("\n").flatMap((u) => (current.data[u] ? [current.data[u]] : [])) : []),
@@ -112,18 +143,33 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
   };
 }
 
-/** フォロー中の配信（分割して取得したものを1つにまとめる）。talents が null の間は取得しない */
+/**
+ * フォロー中の配信（分割して取得したものを1つにまとめる）。talents が null の間は取得しない。
+ * フォローが多い（リクエストが多い）ほど更新間隔を延ばす（最大で5倍）。
+ */
 export function useStreamsFeed(talents: Talent[] | null, intervalMs: number) {
   const urls = useMemo(() => (talents ? streamsUrls(talents) : null), [talents]);
-  const { results, error, loading, updatedAt, refresh } = usePollingMany<StreamsResponse>(urls, intervalMs);
+  const skipped = useMemo(() => (talents ? polledChannels(talents).skipped : 0), [talents]);
+  const interval = intervalMs * Math.min(5, Math.max(1, Math.ceil((urls?.length ?? 0) / 3)));
+  const { results, error, loading, updatedAt, refresh } = usePollingMany<StreamsResponse>(urls, interval);
   const data = useMemo<StreamsResponse | undefined>(() => {
     if (results.length === 0) return undefined;
+    // 分割したリクエストごとに同じ API 全体のエラーが返るので、重複を除く
+    const seen = new Set<string>();
+    const errors = results
+      .flatMap((r) => r.errors)
+      .filter((e) => {
+        const k = `${e.channel}\n${e.message}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
     return {
       streams: results.flatMap((r) => r.streams).sort(compareStreams),
-      errors: results.flatMap((r) => r.errors),
+      errors,
       providers: results[0].providers,
       fetchedAt: results[0].fetchedAt,
     };
   }, [results]);
-  return { data, error, loading, updatedAt, refresh };
+  return { data, error, loading, updatedAt, refresh, skipped, intervalMs: interval };
 }

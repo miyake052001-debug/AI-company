@@ -133,7 +133,9 @@ const ORG_NAMES: Record<string, string> = {
   "774inc": "ななしいんく",
   Neoporte: "ネオポルテ",
   "Aogiri Highschool": "あおぎり高校",
+  "Nori Pro": "のりプロ",
   NoriPro: "のりプロ",
+  "Neo-Porte": "ネオポルテ",
 };
 
 export function orgLabel(org: string | undefined): string | undefined {
@@ -180,6 +182,9 @@ export async function getLiveVtubers(): Promise<Stream[]> {
     url.searchParams.set("status", "live");
     url.searchParams.set("type", "stream");
     url.searchParams.set("org", "All Vtubers");
+    // 既定の並び（開始時刻順）で100件に切られないよう、視聴者数の多い順で頼む
+    url.searchParams.set("sort", "live_viewers");
+    url.searchParams.set("order", "desc");
     url.searchParams.set("limit", "100");
     const res = await fetch(url, { cache: "no-store", headers: { "X-APIKEY": process.env.HOLODEX_API_KEY ?? "" } });
     if (!res.ok) throw new Error(`Holodex: ${res.status} ${res.statusText}`);

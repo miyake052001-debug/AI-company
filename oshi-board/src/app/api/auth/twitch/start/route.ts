@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const limited = rateLimit(request, "auth", 20);
   if (limited) return limited;
   if (!twitchEnabled()) {
-    return backToChannels(request, "twitch", { ok: false, error: "Twitch の API キーが設定されていません" });
+    return backToChannels(request, "twitch", { ok: false, error: "disabled" });
   }
   return redirectToProvider(request, "twitch", (state) => {
     const url = new URL("https://id.twitch.tv/oauth2/authorize");

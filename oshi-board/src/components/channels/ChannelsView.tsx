@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PRESET_GROUPS } from "@/data/presets";
-import { sanitizeTalents, talentActions, useTalents } from "@/lib/client/state";
+import { isFollowed, sanitizeTalents, talentActions, useTalentIndex, useTalents } from "@/lib/client/state";
 import { useHydrated } from "@/lib/client/store";
 import { useStreamsFeed } from "@/lib/client/useStreamsFeed";
+import { importErrorMessage } from "@/lib/importErrors";
 import type { ImportCandidate, ImportResponse, Talent } from "@/lib/types";
 import { EditIcon, PlusIcon, SearchIcon, StarIcon, TrashIcon, TwitchIcon, YouTubeIcon } from "../icons";
 import { Avatar, toast } from "../ui";
@@ -18,6 +19,8 @@ export function ChannelsView() {
   const [editing, setEditing] = useState<Talent | "new" | null>(null);
   const [filter, setFilter] = useState("");
   const [importing, setImporting] = useState<{
+    /** 取り込みのたびに変える（ダイアログの選択状態を引き継がないように） */
+    id: number;
     title: string;
     candidates: ImportCandidate[];
     truncated?: boolean;
@@ -33,7 +36,8 @@ export function ChannelsView() {
     if (!provider && !error) return;
     window.history.replaceState(null, "", "/channels");
     if (error) {
-      toast(error);
+      // URL から来た文字列はそのまま表示しない（決まった文言に置き換える）
+      toast(importErrorMessage(error, params.get("import_provider")));
       return;
     }
     if (provider !== "twitch" && provider !== "google") return;
@@ -47,6 +51,7 @@ export function ChannelsView() {
           return;
         }
         setImporting({
+          id: Date.now(),
           title: provider === "twitch" ? "Twitch でフォローしている人" : "YouTube の登録チャンネル",
           candidates: json.candidates,
           truncated: json.truncated,
@@ -64,8 +69,13 @@ export function ChannelsView() {
     return map;
   }, [data]);
 
-  const followedIds = new Set(talents.map((t) => t.id));
-  const q = filter.trim().toLowerCase();
+  // プリセットの「フォロー済み」はチャンネルで判定する（取り込みや「見つける」で追加した人も含めるため）
+  const index = useTalentIndex(talents);
+  const presetFollowed = (t: Talent) =>
+    (!!t.youtubeChannelId && isFollowed(index, { platform: "youtube", id: t.youtubeChannelId })) ||
+    (!!t.twitchLogin && isFollowed(index, { platform: "twitch", id: t.twitchLogin }));
+  const showFilter = talents.length > 10 || filter !== "";
+  const q = showFilter ? filter.trim().toLowerCase() : "";
   const shown = q
     ? talents.filter((t) =>
         [t.name, t.group, t.youtubeChannelId, t.twitchLogin].some((v) => v?.toLowerCase().includes(q)),
@@ -85,8 +95,12 @@ export function ChannelsView() {
     try {
       const list = sanitizeTalents(JSON.parse(await file.text()));
       if (!list) throw new Error("配列ではありません");
-      talentActions.addMany(list);
-      toast(`${list.length}件を読み込みました`);
+      const added = talentActions.addMany(list);
+      toast(
+        added === list.length
+          ? `${added}件を読み込みました`
+          : `${added}件を読み込みました（${list.length - added}件はフォロー済みのため飛ばしました）`,
+      );
     } catch (e) {
       toast(`読み込めませんでした: ${e instanceof Error ? e.message : e}`);
     }
@@ -126,10 +140,13 @@ export function ChannelsView() {
         </div>
       )}
 
-      <ImportPanel onCandidates={(title, candidates, defaultGroup) => setImporting({ title, candidates, defaultGroup })} />
+      <ImportPanel
+        onCandidates={(title, candidates, defaultGroup) => setImporting({ id: Date.now(), title, candidates, defaultGroup })}
+      />
 
       {importing && (
         <ImportDialog
+          key={importing.id}
           title={importing.title}
           candidates={importing.candidates}
           truncated={importing.truncated}
@@ -141,7 +158,7 @@ export function ChannelsView() {
       <section className="mt-5 overflow-hidden rounded-xl border border-line bg-panel">
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2 text-xs text-muted">
           <span>フォロー中 {hydrated ? talents.length : "-"} 人</span>
-          {hydrated && talents.length > 10 && (
+          {hydrated && showFilter && (
             <label className="flex min-w-32 flex-1 items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 sm:max-w-56">
               <SearchIcon size={12} />
               <input
@@ -267,7 +284,7 @@ export function ChannelsView() {
         <p className="text-xs text-muted">公開情報をもとに登録したチャンネル一覧です。卒業・移籍などで古くなっている場合があります。</p>
         <div className="mt-3 flex flex-col gap-4">
           {PRESET_GROUPS.map((g) => {
-            const remaining = g.talents.filter((t) => !followedIds.has(t.id));
+            const remaining = g.talents.filter((t) => !presetFollowed(t));
             return (
               <div key={g.name} className="rounded-xl border border-line bg-panel p-3">
                 <div className="mb-2 flex items-center gap-2">
@@ -277,8 +294,8 @@ export function ChannelsView() {
                     type="button"
                     disabled={!hydrated || remaining.length === 0}
                     onClick={() => {
-                      talentActions.addMany(remaining);
-                      toast(`${g.name}の${remaining.length}人を追加しました`);
+                      const added = talentActions.addMany(remaining);
+                      toast(`${g.name}の${added}人を追加しました`);
                     }}
                     className="ml-auto rounded-md border border-line px-2.5 py-1 text-xs hover:border-muted/60 disabled:opacity-40"
                   >
@@ -287,7 +304,7 @@ export function ChannelsView() {
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {g.talents.map((t) => {
-                    const followed = hydrated && followedIds.has(t.id);
+                    const followed = hydrated && presetFollowed(t);
                     return (
                       <button
                         key={t.id}
@@ -312,3 +329,4 @@ export function ChannelsView() {
     </main>
   );
 }
+

@@ -6,9 +6,13 @@ import { rateLimit } from "@/lib/server/rateLimit";
 
 /** POST /api/import/google — ログイン直後に一度だけ呼ぶ。YouTube の登録チャンネルを返し、トークンは失効させる */
 export async function POST(request: NextRequest) {
-  const limited = rateLimit(request, "import", 10);
-  if (limited) return limited;
   const token = readToken(request, "google");
+  const limited = rateLimit(request, "import", 10);
+  if (limited) {
+    // 取り込めないトークンを残さない（もう一度ログインからやり直してもらう）
+    if (token) await revokeGoogleToken(token);
+    return clearToken(limited, "google");
+  }
   if (!token) {
     return NextResponse.json({ error: "Google へのログインからやり直してください" }, { status: 401 });
   }

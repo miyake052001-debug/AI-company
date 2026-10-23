@@ -146,6 +146,26 @@ export interface VideoInfo {
 /** 取得に失敗したとき、ライブ/予定の古い値を使ってよい時間（それ以上古いと終了済みを LIVE と出してしまう） */
 const STALE_ACTIVE_MS = 15 * 60_000;
 
+/**
+ * 動画情報をキャッシュしておく時間。状態が変わりうるものだけ短くする。
+ *   - 配信中: 90秒（視聴者数・終了を拾う）
+ *   - 予定: 開始が近いほど短く（最短90秒・最長30分）。フリーチャット枠は6時間
+ *   - 終了済み・通常の動画: 6時間
+ */
+export function videoTtl(info: VideoInfo, now: number): number {
+  if (info.kind === "live") return 90_000;
+  if (info.kind === "upcoming") {
+    if (FREE_CHAT_RE.test(info.title)) return 6 * HOUR;
+    const start = info.startAt ? Date.parse(info.startAt) : NaN;
+    if (Number.isNaN(start)) return 90_000;
+    return Math.min(30 * 60_000, Math.max(90_000, (start - now) / 4));
+  }
+  return 6 * HOUR;
+}
+
+/** 動画情報の問い合わせ（videos.list・50本で1ユニット）の1時間あたりの上限。フォローが非常に多い人がいても1日の枠を超えないように */
+const VIDEO_BATCHES_PER_HOUR = 250;
+
 export function toVideoInfo(item: YtVideoItem): VideoInfo | null {
   const sn = item.snippet;
   if (!sn) return null;
@@ -257,6 +277,9 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
   }
   for (const batch of chunk(missing, 50)) {
     try {
+      if (!takeBudget("yt:videos", VIDEO_BATCHES_PER_HOUR, HOUR)) {
+        throw new LimitError("YouTube の配信情報の取得が混み合っています。しばらくは前回の情報を表示します");
+      }
       const data = await ytApi<{ items?: YtVideoItem[] }>("videos", {
         part: "snippet,liveStreamingDetails",
         id: batch.join(","),
@@ -268,8 +291,7 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
         if (!info) continue;
         found.add(info.id);
         videos.set(info.id, info);
-        const active = info.kind === "live" || info.kind === "upcoming";
-        put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, active ? 90_000 : 6 * HOUR);
+        put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, videoTtl(info, Date.now()));
       }
       // 非公開・削除済みは null をキャッシュして毎回問い合わせない
       for (const id of batch) if (!found.has(id)) put(`yt:video:${id}`, null, 6 * HOUR);

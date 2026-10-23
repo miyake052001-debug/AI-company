@@ -1,6 +1,7 @@
 import "server-only";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
+import type { ImportErrorCode } from "@/lib/importErrors";
 
 /*
  * フォロー取り込み用の OAuth（Twitch / Google）。
@@ -12,16 +13,32 @@ import { NextResponse, type NextRequest } from "next/server";
 
 export type OAuthProvider = "twitch" | "google";
 
+
 const STATE_TTL_SEC = 10 * 60;
 const TOKEN_TTL_SEC = 10 * 60;
 
 const stateCookie = (p: OAuthProvider) => `oshiboard_oauth_state_${p}`;
 const tokenCookie = (p: OAuthProvider) => `oshiboard_oauth_token_${p}`;
 
-/** 公開URL（リダイレクトURIの組み立て用）。プロキシの後ろで動かすときは APP_URL を設定する */
+let warnedOrigin = false;
+
+/** 公開URL（リダイレクトURIの組み立て用）。Vercel 以外で動かすときは APP_URL が必要 */
 export function appOrigin(request: NextRequest): string {
   const configured = process.env.APP_URL?.trim().replace(/\/+$/, "");
-  return configured || request.nextUrl.origin;
+  if (configured) return configured;
+  const origin = request.nextUrl.origin;
+  if (
+    !warnedOrigin &&
+    !process.env.VERCEL &&
+    process.env.NODE_ENV === "production" &&
+    /^https?:\/\/(localhost|0\.0\.0\.0|127\.0\.0\.1)(:|$)/.test(origin)
+  ) {
+    warnedOrigin = true;
+    console.warn(
+      `[oshi-board] 公開URLが ${origin} と判定されました。Vercel 以外で動かすときは APP_URL（例: https://board.example.com）を設定してください。`,
+    );
+  }
+  return origin;
 }
 
 export function callbackUrl(request: NextRequest, provider: OAuthProvider): string {
@@ -51,10 +68,13 @@ export function redirectToProvider(
 }
 
 /** コールバックの state が start で発行したものと一致するか */
+const STATE_RE = /^[0-9a-f]{48}$/;
+
 export function verifyState(request: NextRequest, provider: OAuthProvider): boolean {
   const expected = request.cookies.get(stateCookie(provider))?.value ?? "";
   const actual = request.nextUrl.searchParams.get("state") ?? "";
-  if (!expected || expected.length !== actual.length) return false;
+  // 形式を先に確かめる（長さの違う値を timingSafeEqual に渡すと例外になるため）
+  if (!STATE_RE.test(expected) || !STATE_RE.test(actual)) return false;
   return timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
 }
 
@@ -62,11 +82,14 @@ export function verifyState(request: NextRequest, provider: OAuthProvider): bool
 export function backToChannels(
   request: NextRequest,
   provider: OAuthProvider,
-  result: { ok: true; token: string } | { ok: false; error: string },
+  result: { ok: true; token: string } | { ok: false; error: ImportErrorCode },
 ): NextResponse {
   const url = new URL("/channels", appOrigin(request));
   if (result.ok) url.searchParams.set("import", provider);
-  else url.searchParams.set("import_error", result.error);
+  else {
+    url.searchParams.set("import_error", result.error);
+    url.searchParams.set("import_provider", provider);
+  }
   const response = NextResponse.redirect(url);
   response.cookies.set(stateCookie(provider), "", { path: `/api/auth/${provider}`, maxAge: 0 });
   if (result.ok) {

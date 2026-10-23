@@ -49,3 +49,19 @@ describe("talentActions.importMany", () => {
     ]);
   });
 });
+
+describe("talentActions.addMany", () => {
+  it("同じIDや、同じチャンネルをフォロー済みの人は飛ばして、追加した数を返す", async () => {
+    const { talentActions, talentsStore } = await import("./state");
+    talentsStore.set([{ id: "a", name: "A", twitchLogin: "kagasumire", youtubeChannelId: "UC1DCedRgGHBdm81E1llLhOQ" }]);
+    const added = talentActions.addMany([
+      { id: "a", name: "同じID" },
+      { id: "b", name: "同じTwitch", twitchLogin: "KagaSumire" },
+      { id: "c", name: "同じYouTube", youtubeChannelId: "UC1DCedRgGHBdm81E1llLhOQ" },
+      { id: "d", name: "新しい人", twitchLogin: "newstreamer" },
+      { id: "e", name: "dの重複", twitchLogin: "newstreamer" },
+    ]);
+    expect(added).toBe(1);
+    expect(talentsStore.get().map((t) => t.id)).toEqual(["a", "d"]);
+  });
+});

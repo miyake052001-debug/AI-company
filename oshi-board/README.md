@@ -59,6 +59,8 @@ YouTube の登録チャンネルを「Google でログイン」して取り込�
 
 1. 「API とサービス」→「OAuth 同意画面」（Google Auth Platform）で、ユーザーの種類「外部」を選んでアプリ名などを入力
 2. 「対象」でテストユーザーに **自分の Google アカウント** を追加（公開ステータスは「テスト」のままで大丈夫。審査は不要で、ログイン時に「未確認のアプリ」と出たら「続行」）
+   - 「テスト」の間は、**ここに登録したアカウント（最大100件）だけ** が Google ログインで取り込めます。家族や友だちにも使ってもらうなら、その人のアカウントも追加してください。それ以外の人は CSV で取り込めます
+   - 誰でも使えるように一般公開するには、アプリを「本番」にして Google の審査（YouTube の読み取り権限は審査が必要な権限です）を通す必要があります
 3. 「データアクセス」でスコープ `https://www.googleapis.com/auth/youtube.readonly` を追加
 4. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ 種類「ウェブ アプリケーション」
    - 承認済みのリダイレクト URI: `https://<公開URL>/api/auth/google/callback`（手元なら `http://localhost:3000/api/auth/google/callback`）
@@ -79,7 +81,9 @@ YouTube の登録チャンネルを「Google でログイン」して取り込�
 3. Environment Variables に上のキーを登録してデプロイ
 4. Twitch アプリ / Google の OAuth クライアントに、公開URLのリダイレクトURL（上の手順）を追加
 
-プレビューデプロイなど別のURLで取り込みを使う場合は、そのURLのリダイレクトURLも登録してください。自分のサーバーでプロキシの後ろに置く場合は、`APP_URL`（例: `https://board.example.com`）を設定すると、リダイレクトURLの組み立てにそれを使います。
+プレビューデプロイなど別のURLで取り込みを使う場合は、そのURLのリダイレクトURLも登録してください。
+
+**Vercel 以外**（`next start`・Docker・Render・Railway など）で動かす場合は、`APP_URL` に公開URL（例: `https://board.example.com`、`https://` から）を必ず設定してください。設定しないとログイン後の戻り先が `localhost` になり、取り込みが失敗します。Twitch・Google に登録するリダイレクトURLも、この `APP_URL` から始まるものにします。
 
 Twitch の埋め込みは HTTPS のページでしか動かないので、本番は必ず HTTPS で配信してください（Vercel なら自動）。
 

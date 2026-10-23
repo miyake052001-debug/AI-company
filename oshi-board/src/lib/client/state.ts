@@ -48,11 +48,26 @@ export const talentActions = {
   add(talent: Talent) {
     talentsStore.set((list) => [...list.filter((t) => t.id !== talent.id), talent]);
   },
-  addMany(talents: Talent[]) {
+  /** まとめて追加（同じIDや、同じチャンネルをすでにフォローしている人は飛ばす） */
+  addMany(talents: Talent[]): number {
+    let added = 0;
     talentsStore.set((list) => {
       const ids = new Set(list.map((t) => t.id));
-      return [...list, ...talents.filter((t) => !ids.has(t.id))];
+      const yt = new Set(list.map((t) => t.youtubeChannelId).filter(Boolean));
+      const tw = new Set(list.map((t) => t.twitchLogin?.toLowerCase()).filter(Boolean));
+      const next = [...list];
+      for (const t of talents) {
+        const login = t.twitchLogin?.toLowerCase();
+        if (ids.has(t.id) || (t.youtubeChannelId && yt.has(t.youtubeChannelId)) || (login && tw.has(login))) continue;
+        ids.add(t.id);
+        if (t.youtubeChannelId) yt.add(t.youtubeChannelId);
+        if (login) tw.add(login);
+        next.push(t);
+        added++;
+      }
+      return next;
     });
+    return added;
   },
   update(id: string, patch: Partial<Talent>) {
     talentsStore.set((list) => list.map((t) => (t.id === id ? { ...t, ...patch, id } : t)));

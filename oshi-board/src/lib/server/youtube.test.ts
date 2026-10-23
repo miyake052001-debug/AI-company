@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseIsoDuration } from "../format";
-import { clipSearchTerm, toStream, toVideoInfo } from "./youtube";
+import { clipSearchTerm, toStream, toVideoInfo, videoTtl } from "./youtube";
 
 const NOW = Date.parse("2026-10-22T12:00:00Z");
 
@@ -88,5 +88,20 @@ describe("clipSearchTerm", () => {
 
   it("プリセットのチャンネルはプリセットの名前を使う", () => {
     expect(clipSearchTerm("なんでも", "Pekora Ch. 兎田ぺこら", "兎田ぺこら")).toBe("兎田ぺこら");
+  });
+});
+
+describe("videoTtl", () => {
+  const base = { id: "dQw4w9WgXcQ", channelId: "UC1DCedRgGHBdm81E1llLhOQ", channelTitle: "x", title: "配信" };
+  it("配信中は短く、終了済みは長く", () => {
+    expect(videoTtl({ ...base, kind: "live" }, NOW)).toBe(90_000);
+    expect(videoTtl({ ...base, kind: "ended" }, NOW)).toBe(6 * 3_600_000);
+  });
+  it("予定は開始が近いほど短く、フリーチャット枠は長く", () => {
+    const soon = videoTtl({ ...base, kind: "upcoming", startAt: new Date(NOW + 5 * 60_000).toISOString() }, NOW);
+    const later = videoTtl({ ...base, kind: "upcoming", startAt: new Date(NOW + 2 * 86_400_000).toISOString() }, NOW);
+    expect(soon).toBe(90_000);
+    expect(later).toBe(30 * 60_000);
+    expect(videoTtl({ ...base, kind: "upcoming", title: "【フリーチャット】", startAt: undefined }, NOW)).toBe(6 * 3_600_000);
   });
 });

@@ -9,20 +9,17 @@ export async function GET(request: NextRequest) {
   if (limited) return limited;
   const params = request.nextUrl.searchParams;
   if (params.get("error")) {
-    return backToChannels(request, "google", { ok: false, error: "Google へのログインがキャンセルされました" });
+    return backToChannels(request, "google", { ok: false, error: "cancelled" });
   }
   const code = params.get("code");
   if (!code || !verifyState(request, "google")) {
-    return backToChannels(request, "google", { ok: false, error: "ログインの確認に失敗しました。もう一度お試しください" });
+    return backToChannels(request, "google", { ok: false, error: "state" });
   }
   try {
     const token = await exchangeGoogleCode(code, callbackUrl(request, "google"));
     return backToChannels(request, "google", { ok: true, token });
   } catch (e) {
     console.error("[oshi-board] Google token exchange failed:", e);
-    return backToChannels(request, "google", {
-      ok: false,
-      error: "Google へのログインに失敗しました（OAuth クライアントのリダイレクトURIの設定を確認してください）",
-    });
+    return backToChannels(request, "google", { ok: false, error: "exchange" });
   }
 }

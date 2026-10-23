@@ -6,9 +6,13 @@ import { rateLimit } from "@/lib/server/rateLimit";
 
 /** POST /api/import/twitch — ログイン直後に一度だけ呼ぶ。フォロー一覧を返し、トークンは失効させる */
 export async function POST(request: NextRequest) {
-  const limited = rateLimit(request, "import", 10);
-  if (limited) return limited;
   const token = readToken(request, "twitch");
+  const limited = rateLimit(request, "import", 10);
+  if (limited) {
+    // 取り込めないトークンを残さない（もう一度ログインからやり直してもらう）
+    if (token) await revokeTwitchToken(token);
+    return clearToken(limited, "twitch");
+  }
   if (!token) {
     return NextResponse.json({ error: "Twitch へのログインからやり直してください" }, { status: 401 });
   }

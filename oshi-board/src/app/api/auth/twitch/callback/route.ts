@@ -9,20 +9,17 @@ export async function GET(request: NextRequest) {
   if (limited) return limited;
   const params = request.nextUrl.searchParams;
   if (params.get("error")) {
-    return backToChannels(request, "twitch", { ok: false, error: "Twitch へのログインがキャンセルされました" });
+    return backToChannels(request, "twitch", { ok: false, error: "cancelled" });
   }
   const code = params.get("code");
   if (!code || !verifyState(request, "twitch")) {
-    return backToChannels(request, "twitch", { ok: false, error: "ログインの確認に失敗しました。もう一度お試しください" });
+    return backToChannels(request, "twitch", { ok: false, error: "state" });
   }
   try {
     const token = await exchangeTwitchCode(code, callbackUrl(request, "twitch"));
     return backToChannels(request, "twitch", { ok: true, token });
   } catch (e) {
     console.error("[oshi-board] Twitch token exchange failed:", e);
-    return backToChannels(request, "twitch", {
-      ok: false,
-      error: "Twitch へのログインに失敗しました（Twitch アプリのリダイレクトURLの設定を確認してください）",
-    });
+    return backToChannels(request, "twitch", { ok: false, error: "exchange" });
   }
 }

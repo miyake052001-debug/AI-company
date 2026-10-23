@@ -62,6 +62,11 @@ export function ImportPanel({ onCandidates }: Props) {
         {status && !status.googleLogin && (
           <li>・YouTube の登録チャンネルを Google ログインで取り込むには Google の OAuth 設定が必要です（README 参照）</li>
         )}
+        {status?.googleLogin && (
+          <li>
+            ・Google ログインは、管理者が Google Cloud でテストユーザーに登録したアカウントだけが使えます。使えない場合は CSV で取り込んでください
+          </li>
+        )}
         <li>
           ・CSV は Google Takeout（takeout.google.com）で「YouTube と YouTube Music」→「登録チャンネル」だけを選んでダウンロードしたものを使います（設定不要）
         </li>

@@ -26,6 +26,25 @@ describe("oauth", () => {
     expect(verifyState(noCookie, "twitch")).toBe(false);
   });
 
+  it("形式の違う state は例外にせず弾く", () => {
+    const cookie = "a".repeat(48);
+    for (const state of ["", "abc", "a".repeat(49), "あ".repeat(16), "A".repeat(48)]) {
+      const req = new NextRequest(`https://oshi.example/api/auth/twitch/callback?state=${encodeURIComponent(state)}`, {
+        headers: { cookie: `oshiboard_oauth_state_twitch=${cookie}` },
+      });
+      expect(verifyState(req, "twitch")).toBe(false);
+    }
+  });
+
+  it("エラーはコードだけをクエリで返す", () => {
+    const req = new NextRequest("https://oshi.example/api/auth/twitch/callback");
+    const res = backToChannels(req, "twitch", { ok: false, error: "cancelled" });
+    const url = new URL(res.headers.get("location")!);
+    expect(url.searchParams.get("import_error")).toBe("cancelled");
+    expect(url.searchParams.get("import_provider")).toBe("twitch");
+    expect(res.cookies.get("oshiboard_oauth_token_twitch")).toBeUndefined();
+  });
+
   it("トークンは取り込み API だけに送られる HttpOnly cookie に入る", () => {
     const req = new NextRequest("https://oshi.example/api/auth/google/callback");
     const res = backToChannels(req, "google", { ok: true, token: "secret-token" });
