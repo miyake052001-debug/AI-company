@@ -31,6 +31,8 @@ export interface Stream {
   startAt?: string;
   endAt?: string;
   category?: string;
+  /** 事務所（「見つける」の VTuber 一覧で使う） */
+  org?: string;
   demo?: boolean;
 }
 
@@ -58,6 +60,32 @@ export interface ProviderStatus {
   youtube: boolean;
   twitch: boolean;
   holodex: boolean;
+  /** Google でログインして YouTube の登録チャンネルを取り込めるか */
+  googleLogin: boolean;
+}
+
+/** フォロー取り込みの候補（Twitch のフォロー / YouTube の登録チャンネル） */
+export interface ImportCandidate {
+  platform: Platform;
+  /** YouTube のチャンネルID / Twitch のログイン名 */
+  id: string;
+  name: string;
+  avatarUrl?: string;
+}
+
+export interface ImportResponse {
+  candidates: ImportCandidate[];
+  /** 件数が多く、途中までしか取得できなかった */
+  truncated?: boolean;
+}
+
+export interface DiscoverResponse {
+  /** 配信中の VTuber（Holodex） */
+  vtubers: Stream[];
+  /** Twitch の日本語の配信（視聴者数順） */
+  twitch: Stream[];
+  providers: ProviderStatus;
+  errors: string[];
 }
 
 export interface ChannelError {

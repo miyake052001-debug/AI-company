@@ -110,3 +110,41 @@ export function demoClips(
     };
   });
 }
+
+const DEMO_STREAMERS = ["ゲーム実況者A", "ストリーマーB", "配信者C", "実況者D", "FPSプレイヤーE", "雑談配信者F", "RTA走者G", "格ゲー勢H"];
+const DEMO_VTUBERS: [string, string][] = [
+  ["VTuber あおい", "ホロライブ"],
+  ["VTuber みどり", "にじさんじ"],
+  ["VTuber しろ", "ぶいすぽっ！"],
+  ["VTuber くろ", "個人勢"],
+  ["VTuber あか", "ホロライブ"],
+  ["VTuber きいろ", "にじさんじ"],
+];
+
+/** 「見つける」タブのデモデータ（キー未設定のとき） */
+export function demoDiscover(kind: "twitch" | "vtuber"): Stream[] {
+  const now = Date.now();
+  const r = rng(`discover:${kind}:${Math.floor(now / 3_600_000)}`);
+  const entries: [string, string | undefined][] =
+    kind === "twitch" ? DEMO_STREAMERS.map((n) => [n, undefined]) : DEMO_VTUBERS;
+  return entries
+    .map(([name, org], i): Stream => {
+      const id = `discover-${kind}-${i}`;
+      return {
+        id: `demo:${id}`,
+        source: `demo:${id}`,
+        platform: kind === "twitch" ? "twitch" : "youtube",
+        status: "live",
+        title: pick(r, STREAM_TITLES),
+        channelId: id,
+        channelName: name,
+        url: "#",
+        viewers: Math.floor(300 + r() * 30000),
+        startAt: new Date(now - (10 + r() * 180) * 60_000).toISOString(),
+        category: kind === "twitch" ? pick(r, GAMES) : undefined,
+        org,
+        demo: true,
+      };
+    })
+    .sort((a, b) => (b.viewers ?? 0) - (a.viewers ?? 0));
+}

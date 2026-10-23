@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { formatAgo, formatCount, formatCountdown, formatElapsed, formatSchedule } from "@/lib/format";
 import type { Stream, Talent } from "@/lib/types";
 import { CheckIcon, ExternalIcon, PlatformIcon, PlusIcon } from "./icons";
@@ -11,9 +12,11 @@ interface Props {
   selected: boolean;
   now: number | null;
   onToggle: () => void;
+  /** カード右下に置く追加の操作（「見つける」のフォローボタンなど） */
+  extra?: ReactNode;
 }
 
-export function StreamCard({ stream, talent, selected, now, onToggle }: Props) {
+export function StreamCard({ stream, talent, selected, now, onToggle, extra }: Props) {
   const name = talent?.name ?? stream.channelName;
   const avatar = stream.avatarUrl ?? talent?.avatarUrl;
 
@@ -96,10 +99,11 @@ export function StreamCard({ stream, talent, selected, now, onToggle }: Props) {
           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
             <PlatformIcon platform={stream.platform} size={13} />
             <span className="truncate">{name}</span>
-            {talent?.group && <span className="shrink-0 truncate">・{talent.group}</span>}
+            {(talent?.group ?? stream.org) && <span className="shrink-0 truncate">・{talent?.group ?? stream.org}</span>}
           </div>
           {stream.category && <div className="mt-0.5 truncate text-xs text-muted/80">{stream.category}</div>}
         </div>
+        {extra}
         {!stream.demo && (
           <a
             href={stream.url}

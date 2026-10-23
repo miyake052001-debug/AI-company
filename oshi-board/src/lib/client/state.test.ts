@@ -26,3 +26,26 @@ describe("sanitizeTalents", () => {
     ]);
   });
 });
+
+describe("talentActions.importMany", () => {
+  it("同じチャンネルは二重に追加しない", async () => {
+    const { talentActions, talentsStore } = await import("./state");
+    talentsStore.set([{ id: "a", name: "A", twitchLogin: "kagasumire" }]);
+    const added = talentActions.importMany(
+      [
+        { platform: "twitch", id: "KagaSumire", name: "花芽すみれ" },
+        { platform: "twitch", id: "newstreamer", name: "新しい人" },
+        { platform: "youtube", id: "UC1DCedRgGHBdm81E1llLhOQ", name: "Pekora" },
+        { platform: "youtube", id: "UC1DCedRgGHBdm81E1llLhOQ", name: "Pekora" },
+        { platform: "youtube", id: "bad-id", name: "x" },
+      ],
+      "取り込み",
+    );
+    expect(added).toBe(2);
+    expect(talentsStore.get().map((t) => [t.id, t.group])).toEqual([
+      ["a", undefined],
+      ["tw-newstreamer", "取り込み"],
+      ["yt-UC1DCedRgGHBdm81E1llLhOQ", "取り込み"],
+    ]);
+  });
+});

@@ -1,5 +1,5 @@
 import "server-only";
-import { CLIP_PERIOD_MS, type ClipPeriod, type ClipRow } from "@/lib/types";
+import { CLIP_PERIOD_MS, type ClipPeriod, type ClipRow, type Stream } from "@/lib/types";
 import { cached, peek } from "./cache";
 import { videoViewCounts, youtubeEnabled, youtubeQuotaExhausted } from "./youtube";
 
@@ -121,4 +121,73 @@ export async function getHolodexClips(youtubeChannelId: string, period: ClipPeri
     truncated: result.truncated,
     tracked: result.tracked,
   };
+}
+
+/* ---------- 配信中の VTuber（「見つける」タブ） ---------- */
+
+const ORG_NAMES: Record<string, string> = {
+  Hololive: "ホロライブ",
+  Nijisanji: "にじさんじ",
+  VSPO: "ぶいすぽっ！",
+  Independents: "個人勢",
+  "774inc": "ななしいんく",
+  Neoporte: "ネオポルテ",
+  "Aogiri Highschool": "あおぎり高校",
+  NoriPro: "のりプロ",
+};
+
+export function orgLabel(org: string | undefined): string | undefined {
+  if (!org) return undefined;
+  return ORG_NAMES[org] ?? org;
+}
+
+interface HolodexLive {
+  id: string;
+  title: string;
+  type?: string;
+  status?: string;
+  start_actual?: string;
+  start_scheduled?: string;
+  live_viewers?: number;
+  topic_id?: string;
+  channel?: { id: string; name: string; english_name?: string; org?: string; photo?: string };
+}
+
+export function holodexLiveToStream(v: HolodexLive): Stream | null {
+  if (v.status !== "live" || (v.type && v.type !== "stream") || !v.channel?.id || !/^[\w-]{11}$/.test(v.id)) return null;
+  return {
+    id: `yt:${v.id}`,
+    source: `yt:${v.id}`,
+    platform: "youtube",
+    status: "live",
+    title: v.title,
+    channelId: v.channel.id,
+    channelName: v.channel.name,
+    avatarUrl: v.channel.photo,
+    thumbnailUrl: `https://i.ytimg.com/vi/${v.id}/mqdefault_live.jpg`,
+    url: `https://www.youtube.com/watch?v=${v.id}`,
+    viewers: v.live_viewers,
+    startAt: v.start_actual ?? v.start_scheduled,
+    category: v.topic_id ? v.topic_id.replace(/_/g, " ") : undefined,
+    org: orgLabel(v.channel.org),
+  };
+}
+
+/** Holodex が追跡している VTuber のうち、いま YouTube で配信中の配信（視聴者数順）。1分キャッシュ */
+export async function getLiveVtubers(): Promise<Stream[]> {
+  return cached<Stream[]>("hd:discover:live", { ttl: 60_000, errorTtl: 30_000, staleOnError: true }, async () => {
+    const url = new URL(`${HOLODEX}/live`);
+    url.searchParams.set("status", "live");
+    url.searchParams.set("type", "stream");
+    url.searchParams.set("org", "All Vtubers");
+    url.searchParams.set("limit", "100");
+    const res = await fetch(url, { cache: "no-store", headers: { "X-APIKEY": process.env.HOLODEX_API_KEY ?? "" } });
+    if (!res.ok) throw new Error(`Holodex: ${res.status} ${res.statusText}`);
+    const json = (await res.json()) as HolodexLive[] | { items?: HolodexLive[] };
+    const list = Array.isArray(json) ? json : (json.items ?? []);
+    return list
+      .map(holodexLiveToStream)
+      .filter((s): s is Stream => !!s)
+      .sort((a, b) => (b.viewers ?? 0) - (a.viewers ?? 0));
+  });
 }

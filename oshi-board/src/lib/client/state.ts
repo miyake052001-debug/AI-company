@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { DEFAULT_TALENTS } from "@/data/presets";
 import type { LayoutMode } from "@/lib/layout";
 import { parseSourceKey } from "@/lib/media";
-import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type Stream, type Talent } from "@/lib/types";
+import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type ImportCandidate, type Stream, type Talent } from "@/lib/types";
 import { createLocalStore, useLocalStore } from "./store";
 
 /* ---------- フォロー中のタレント ---------- */
@@ -63,6 +63,41 @@ export const talentActions = {
   toggleFavorite(id: string) {
     talentsStore.set((list) => list.map((t) => (t.id === id ? { ...t, favorite: !t.favorite } : t)));
   },
+  /**
+   * 取り込み候補をまとめてフォローする。すでに同じチャンネルをフォローしている人は飛ばす。
+   * 追加した人数を返す。
+   */
+  importMany(candidates: ImportCandidate[], group?: string): number {
+    let added = 0;
+    talentsStore.set((list) => {
+      const yt = new Set(list.map((t) => t.youtubeChannelId).filter(Boolean));
+      const tw = new Set(list.map((t) => t.twitchLogin?.toLowerCase()).filter(Boolean));
+      const ids = new Set(list.map((t) => t.id));
+      const next = [...list];
+      for (const c of candidates) {
+        const isYouTube = c.platform === "youtube";
+        const key = isYouTube ? c.id : c.id.toLowerCase();
+        const seen = isYouTube ? yt : tw;
+        if (seen.has(key)) continue;
+        if (isYouTube ? !YOUTUBE_CHANNEL_ID_RE.test(key) : !TWITCH_LOGIN_RE.test(key)) continue;
+        seen.add(key);
+        let id = `${isYouTube ? "yt" : "tw"}-${key}`;
+        if (ids.has(id)) id = newId(isYouTube ? "yt" : "tw");
+        ids.add(id);
+        next.push({
+          id,
+          name: c.name || key,
+          group: group?.trim() || undefined,
+          youtubeChannelId: isYouTube ? key : undefined,
+          twitchLogin: isYouTube ? undefined : key,
+          avatarUrl: c.avatarUrl,
+        });
+        added++;
+      }
+      return next;
+    });
+    return added;
+  },
   replaceAll(list: Talent[]) {
     talentsStore.set(list);
   },
@@ -87,15 +122,8 @@ export function talentForStream(index: Map<string, Talent>, s: Stream): Talent |
   return index.get(`${s.platform === "youtube" ? "yt" : "tw"}:${s.channelId}`);
 }
 
-/** /api/streams のURL（キャッシュが効くようにIDはソートしておく） */
-export function streamsUrl(talents: Talent[]): string | null {
-  const yt = [...new Set(talents.map((t) => t.youtubeChannelId).filter((v): v is string => !!v))].sort();
-  const tw = [...new Set(talents.map((t) => t.twitchLogin?.toLowerCase()).filter((v): v is string => !!v))].sort();
-  if (yt.length === 0 && tw.length === 0) return null;
-  const params = new URLSearchParams();
-  if (yt.length) params.set("yt", yt.join(","));
-  if (tw.length) params.set("tw", tw.join(","));
-  return `/api/streams?${params}`;
+export function isFollowed(index: Map<string, Talent>, c: { platform: "youtube" | "twitch"; id: string }): boolean {
+  return index.has(c.platform === "youtube" ? `yt:${c.id}` : `tw:${c.id.toLowerCase()}`);
 }
 
 /* ---------- マルチビュー ---------- */

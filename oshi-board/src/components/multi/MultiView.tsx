@@ -8,7 +8,6 @@ import {
   MAX_MULTI,
   multiActions,
   multiPrefsStore,
-  streamsUrl,
   useMulti,
   useMultiPrefs,
   useTalentIndex,
@@ -16,8 +15,8 @@ import {
   type MultiItem,
 } from "@/lib/client/state";
 import { useHost, useHydrated } from "@/lib/client/store";
-import { usePolling } from "@/lib/client/usePolling";
-import type { StreamsResponse, Talent } from "@/lib/types";
+import { useStreamsFeed } from "@/lib/client/useStreamsFeed";
+import type { Talent } from "@/lib/types";
 import { ChatIcon, FocusIcon, FullscreenIcon, GridIcon, LinkIcon, PlusIcon, TrashIcon } from "../icons";
 import { toggleInMulti } from "../MultiDock";
 import { toast } from "../ui";
@@ -53,7 +52,7 @@ export function MultiView() {
 
   // 配信中リストは「空のとき」か「配信中から追加」を開いているときだけ取得する
   const wantStreams = hydrated && (pickerOpen || multi.length === 0);
-  const live = usePolling<StreamsResponse>(wantStreams ? streamsUrl(talents) : null, 120_000);
+  const live = useStreamsFeed(wantStreams ? talents : null, 120_000);
 
   // 共有リンク（/multi?s=yt:xxx,tw:yyy）から復元
   useEffect(() => {

@@ -1,10 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { streamsUrl, talentForStream, useMulti, useTalentIndex, useTalents } from "@/lib/client/state";
+import { talentForStream, useMulti, useTalentIndex, useTalents } from "@/lib/client/state";
 import { useHydrated, useNow } from "@/lib/client/store";
-import { usePolling } from "@/lib/client/usePolling";
-import type { Platform, StreamStatus, StreamsResponse } from "@/lib/types";
+import { useStreamsFeed } from "@/lib/client/useStreamsFeed";
+import type { Platform, StreamStatus } from "@/lib/types";
 import { RefreshIcon, SearchIcon, StarIcon, TwitchIcon, YouTubeIcon } from "./icons";
 import { MultiDock, toggleInMulti } from "./MultiDock";
 import { StreamCard } from "./StreamCard";
@@ -22,10 +22,7 @@ export function StreamsView() {
   const index = useTalentIndex(talents);
   const multi = useMulti();
   const now = useNow();
-  const { data, error, loading, refresh, updatedAt } = usePolling<StreamsResponse>(
-    hydrated ? streamsUrl(talents) : null,
-    120_000,
-  );
+  const { data, error, loading, refresh, updatedAt } = useStreamsFeed(hydrated ? talents : null, 120_000);
 
   const [tab, setTab] = useState<StreamStatus>("live");
   const [query, setQuery] = useState("");

@@ -282,6 +282,25 @@ export async function getTwitchStreams(logins: string[]): Promise<{ streams: Str
   return { streams, errors };
 }
 
+/**
+ * 日本語で配信中の Twitch ストリーム（視聴者数順・上位100）。「見つける」タブ用。
+ * 全員に同じ結果なので1分キャッシュ（Helix 1〜2回/分）。
+ */
+export async function getJapaneseLiveStreams(): Promise<Stream[]> {
+  return cached<Stream[]>("tw:discover:ja", { ttl: 60_000, errorTtl: 30_000, staleOnError: true }, async () => {
+    const data = await helix<{ data: HelixStream[] }>("streams", [
+      ["language", "ja"],
+      ["type", "live"],
+      ["first", "100"],
+    ]);
+    let users = new Map<string, TwitchUser>();
+    try {
+      users = await twitchUsers(data.data.map((s) => s.user_login.toLowerCase()));
+    } catch {}
+    return data.data.map((s) => liveToStream(s, users.get(s.user_login.toLowerCase())?.avatarUrl));
+  });
+}
+
 /** 期間内のクリップ（再生数順・30分キャッシュ） */
 export async function getTwitchClips(twitchLogin: string, period: ClipPeriod): Promise<ClipRow[]> {
   return cached<ClipRow[]>(

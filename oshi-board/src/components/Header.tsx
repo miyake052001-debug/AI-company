@@ -7,6 +7,7 @@ import { useHydrated } from "@/lib/client/store";
 
 const NAV = [
   { href: "/", label: "配信" },
+  { href: "/discover", label: "見つける" },
   { href: "/multi", label: "マルチビュー" },
   { href: "/clips", label: "切り抜き" },
   { href: "/channels", label: "フォロー管理" },

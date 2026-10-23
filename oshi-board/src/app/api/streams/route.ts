@@ -1,20 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { rateLimit } from "@/lib/server/rateLimit";
+import { compareStreams } from "@/lib/streams";
 import { errorMessage } from "@/lib/server/cache";
 import { demoStreams } from "@/lib/server/demo";
 import { parseList, providerStatus } from "@/lib/server/providers";
 import { getTwitchStreams } from "@/lib/server/twitch";
 import { getYouTubeStreams } from "@/lib/server/youtube";
 import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type ChannelError, type Stream, type StreamsResponse } from "@/lib/types";
-
-const STATUS_ORDER = { live: 0, upcoming: 1, ended: 2 } as const;
-
-function compare(a: Stream, b: Stream): number {
-  if (a.status !== b.status) return STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-  if (a.status === "live") return (b.viewers ?? 0) - (a.viewers ?? 0);
-  if (a.status === "upcoming") return Date.parse(a.startAt ?? "") - Date.parse(b.startAt ?? "");
-  return Date.parse(b.endAt ?? b.startAt ?? "") - Date.parse(a.endAt ?? a.startAt ?? "");
-}
 
 /** GET /api/streams?yt=UCxxx,UCyyy&tw=login1,login2 */
 export async function GET(request: NextRequest) {
@@ -54,7 +46,7 @@ export async function GET(request: NextRequest) {
   ]);
 
   const body: StreamsResponse = {
-    streams: streams.sort(compare),
+    streams: streams.sort(compareStreams),
     errors,
     providers,
     fetchedAt: new Date().toISOString(),
