@@ -81,12 +81,15 @@ export function clientIp(headers: Headers): string {
   const hops = Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1);
   const rawIp = forwarded[Math.max(0, forwarded.length - hops)] ?? "unknown";
   const ip = normalizeIp(rawIp);
-  // プロキシが X-Real-IP だけを付けて X-Forwarded-For を付けていない（全員がプロキシのアドレスに見える）設定の検出
+  // プロキシが X-Real-IP だけを付けて X-Forwarded-For を付けていない（全員がプロキシのアドレスに見える）設定の検出。
+  // 両方が同じ値なら LAN 内の利用者が正しく見えているだけなので警告しない
+  const realIp = headers.get("x-real-ip");
   if (
     !warnedLocal &&
     process.env.NODE_ENV === "production" &&
     (ip === "unknown" || isLocalAddress(ip)) &&
-    headers.has("x-real-ip")
+    realIp &&
+    normalizeIp(realIp.split(",")[0]) !== ip
   ) {
     warnedLocal = true;
     console.warn(

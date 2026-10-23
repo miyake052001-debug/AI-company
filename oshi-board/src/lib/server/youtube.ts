@@ -290,8 +290,13 @@ interface ChannelSnippet {
   avatarUrl?: string;
 }
 
-/** チャンネル名とアイコン（1日キャッシュ） */
-async function channelSnippets(channelIds: string[]): Promise<Map<string, ChannelSnippet>> {
+/**
+ * チャンネル名とアイコン（1日キャッシュ）。
+ * 未取得分の問い合わせが1時間の上限に達したら、それまでに取れた分だけ返す（limited: true）。
+ */
+async function channelSnippets(
+  channelIds: string[],
+): Promise<{ snippets: Map<string, ChannelSnippet>; limited: boolean }> {
   const out = new Map<string, ChannelSnippet>();
   const missing: string[] = [];
   for (const id of new Set(channelIds)) {
@@ -301,9 +306,7 @@ async function channelSnippets(channelIds: string[]): Promise<Map<string, Channe
   }
   for (const batch of chunk(missing, 50)) {
     // 外部から任意のチャンネルIDを渡せるので、未取得分の問い合わせは1時間あたりの上限まで
-    if (!takeBudget("yt:channels", CHANNEL_LOOKUPS_PER_HOUR, HOUR)) {
-      throw new LimitError("YouTube のチャンネル情報の取得が混み合っています。しばらくしてから再試行します");
-    }
+    if (!takeBudget("yt:channels", CHANNEL_LOOKUPS_PER_HOUR, HOUR)) return { snippets: out, limited: true };
     const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
       "channels",
       { part: "snippet", id: batch.join(","), maxResults: "50" },
@@ -320,7 +323,7 @@ async function channelSnippets(channelIds: string[]): Promise<Map<string, Channe
     }
     for (const id of batch) if (!found.has(id)) put(`yt:channel:${id}`, null, HOUR);
   }
-  return out;
+  return { snippets: out, limited: false };
 }
 
 export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams: Stream[]; errors: ChannelError[] }> {
@@ -343,7 +346,7 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
   // アイコンは存在が確認できたチャンネルだけ取る（存在しないIDで channels.list を使わせない）
   let snippets = new Map<string, ChannelSnippet>();
   try {
-    snippets = await channelSnippets(found);
+    snippets = (await channelSnippets(found)).snippets;
   } catch {}
 
   const now = Date.now();
@@ -358,6 +361,27 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
 }
 
 /* ---------- 切り抜き ---------- */
+
+/**
+ * チャンネルが存在するかを RSS（無料）で確かめる。
+ * 外部から任意のIDで切り抜き検索を呼べるので、存在しないIDで channels.list の上限を使わせないため。
+ */
+async function channelFeedStatus(channelId: string): Promise<"found" | "missing" | "unknown"> {
+  if (peek(`yt:recent:${channelId}`) !== undefined) return "found";
+  return cached<"found" | "missing" | "unknown">(
+    `yt:feed:${channelId}`,
+    { ttl: (st) => (st === "found" ? 6 * HOUR : st === "missing" ? 30 * 60_000 : 60_000) },
+    async () => {
+      try {
+        const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { cache: "no-store" });
+        if (res.ok) return "found";
+        return res.status === 404 ? "missing" : "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
+  );
+}
 
 /** 再生数（6時間キャッシュ）。Holodex の切り抜きに再生数を付けるために使う。失敗しても空で返す */
 export async function videoViewCounts(ids: string[]): Promise<Map<string, number>> {
@@ -445,8 +469,14 @@ export async function searchYouTubeClips(
     `yt:clips:${channelId}:${period}`,
     { ttl: plan.ttl, errorTtl: (e) => (isQuotaError(e) ? HOUR : 10 * 60_000), staleOnError: true },
     async () => {
-      const channel = (await channelSnippets([channelId])).get(channelId);
-      if (!channel) throw new Error("YouTube チャンネルが見つかりません");
+      if ((await channelFeedStatus(channelId)) === "missing") throw new Error("YouTube チャンネルが見つかりません");
+      const { snippets, limited } = await channelSnippets([channelId]);
+      const channel = snippets.get(channelId);
+      if (!channel) {
+        throw limited
+          ? new LimitError("YouTube のチャンネル情報の取得が混み合っています。しばらくしてから再試行します")
+          : new Error("YouTube チャンネルが見つかりません");
+      }
       if (!takeBudget(SEARCH_BUDGET, searchDailyLimit(), DAY, QUOTA_DAY_OFFSET)) {
         throw new LimitError(
           "今日の YouTube 切り抜き検索の上限に達しました（Holodex の API キーを設定すると上限なしで取得できます）",

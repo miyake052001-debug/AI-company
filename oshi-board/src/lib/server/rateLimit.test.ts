@@ -63,3 +63,18 @@ describe("normalizeIp", () => {
     expect(normalizeIp("::ffff:1.2.3.4")).not.toBe(normalizeIp("::ffff:5.6.7.8"));
   });
 });
+
+describe("プロキシ設定の警告", () => {
+  it("LAN の利用者が正しく見えているときは出さず、全員がプロキシのアドレスに見えるときだけ出す", async () => {
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.resetModules();
+    const { clientIp: freshClientIp } = await import("./rateLimit");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    freshClientIp(new Headers({ "x-forwarded-for": "192.168.1.5", "x-real-ip": "192.168.1.5" }));
+    expect(warn).not.toHaveBeenCalled();
+    freshClientIp(new Headers({ "x-forwarded-for": "127.0.0.1", "x-real-ip": "203.0.113.9" }));
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+});
