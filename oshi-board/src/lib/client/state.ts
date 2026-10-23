@@ -1,0 +1,302 @@
+"use client";
+
+import { useMemo } from "react";
+import { DEFAULT_TALENTS } from "@/data/presets";
+import type { LayoutMode } from "@/lib/layout";
+import { parseSourceKey } from "@/lib/media";
+import { TWITCH_LOGIN_RE, YOUTUBE_CHANNEL_ID_RE, type ImportCandidate, type Stream, type Talent } from "@/lib/types";
+import { createLocalStore, useLocalStore } from "./store";
+
+/* ---------- フォロー中のタレント ---------- */
+
+const optionalString = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+/** localStorage やインポートしたJSONを、壊れた値が混ざっていても安全な Talent[] にする */
+export function sanitizeTalents(v: unknown): Talent[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: Talent[] = [];
+  for (const t of v) {
+    if (!t || typeof t !== "object") continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.id !== "string" || !r.id || typeof r.name !== "string" || !r.name) continue;
+    const youtubeChannelId = optionalString(r.youtubeChannelId);
+    const twitchLogin = optionalString(r.twitchLogin)?.toLowerCase();
+    out.push({
+      id: r.id,
+      name: r.name,
+      group: optionalString(r.group),
+      youtubeChannelId: youtubeChannelId && YOUTUBE_CHANNEL_ID_RE.test(youtubeChannelId) ? youtubeChannelId : undefined,
+      twitchLogin: twitchLogin && TWITCH_LOGIN_RE.test(twitchLogin) ? twitchLogin : undefined,
+      avatarUrl: optionalString(r.avatarUrl),
+      favorite: r.favorite === true ? true : undefined,
+    });
+  }
+  return out;
+}
+
+export const talentsStore = createLocalStore<Talent[]>("oshiboard:talents:v1", DEFAULT_TALENTS, sanitizeTalents);
+
+export function useTalents(): Talent[] {
+  return useLocalStore(talentsStore);
+}
+
+export function newId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export const talentActions = {
+  add(talent: Talent) {
+    talentsStore.set((list) => [...list.filter((t) => t.id !== talent.id), talent]);
+  },
+  /**
+   * まとめて追加（プリセット・JSON の読み込み）。追加した人数（チャンネルを足した人も含む）を返す。
+   *   - 同じIDの人がいれば飛ばす（チャンネルを直したり外したりした、手元の登録を優先する）
+   *   - 持っているチャンネルがすべてフォロー済みなら飛ばす
+   *   - 一部だけフォロー済みなら、足りないチャンネルを、フォロー済みのチャンネルを持つ人に足す
+   *     （例: Twitch だけ取り込んだ人をプリセットから追加すると、YouTube も見るようになる）
+   */
+  addMany(talents: Talent[]): number {
+    let added = 0;
+    talentsStore.set((list) => {
+      const next = [...list];
+      const byId = new Map<string, number>();
+      const byYt = new Map<string, number>();
+      const byTw = new Map<string, number>();
+      const index = (t: Talent, i: number) => {
+        byId.set(t.id, i);
+        if (t.youtubeChannelId) byYt.set(t.youtubeChannelId, i);
+        if (t.twitchLogin) byTw.set(t.twitchLogin.toLowerCase(), i);
+      };
+      next.forEach(index);
+      for (const t of talents) {
+        if (byId.has(t.id)) continue;
+        const login = t.twitchLogin?.toLowerCase();
+        const ytNew = !!t.youtubeChannelId && !byYt.has(t.youtubeChannelId);
+        const twNew = !!login && !byTw.has(login);
+        if (!ytNew && !twNew) {
+          // チャンネルのない人はそのまま追加する
+          if (t.youtubeChannelId || login) continue;
+          next.push(t);
+          index(t, next.length - 1);
+          added++;
+          continue;
+        }
+        const ownerIndex =
+          (t.youtubeChannelId ? byYt.get(t.youtubeChannelId) : undefined) ?? (login ? byTw.get(login) : undefined);
+        const owner = ownerIndex === undefined ? undefined : next[ownerIndex];
+        const canMerge = owner && (!ytNew || !owner.youtubeChannelId) && (!twNew || !owner.twitchLogin);
+        if (owner && ownerIndex !== undefined && canMerge) {
+          const merged: Talent = {
+            ...owner,
+            youtubeChannelId: owner.youtubeChannelId ?? (ytNew ? t.youtubeChannelId : undefined),
+            twitchLogin: owner.twitchLogin ?? (twNew ? login : undefined),
+            avatarUrl: owner.avatarUrl ?? t.avatarUrl,
+          };
+          next[ownerIndex] = merged;
+          index(merged, ownerIndex);
+        } else {
+          // フォロー済みのチャンネルは外して、新しいチャンネルだけの人として追加する
+          const fresh: Talent = {
+            ...t,
+            youtubeChannelId: ytNew ? t.youtubeChannelId : undefined,
+            twitchLogin: twNew ? login : undefined,
+          };
+          next.push(fresh);
+          index(fresh, next.length - 1);
+        }
+        added++;
+      }
+      return next;
+    });
+    return added;
+  },
+  update(id: string, patch: Partial<Talent>) {
+    talentsStore.set((list) => list.map((t) => (t.id === id ? { ...t, ...patch, id } : t)));
+  },
+  remove(id: string) {
+    talentsStore.set((list) => list.filter((t) => t.id !== id));
+  },
+  toggleFavorite(id: string) {
+    talentsStore.set((list) => list.map((t) => (t.id === id ? { ...t, favorite: !t.favorite } : t)));
+  },
+  /**
+   * 取り込み候補をまとめてフォローする。すでに同じチャンネルをフォローしている人は飛ばす。
+   * 追加した人数を返す。
+   */
+  importMany(candidates: ImportCandidate[], group?: string): number {
+    let added = 0;
+    talentsStore.set((list) => {
+      const yt = new Set(list.map((t) => t.youtubeChannelId).filter(Boolean));
+      const tw = new Set(list.map((t) => t.twitchLogin?.toLowerCase()).filter(Boolean));
+      const ids = new Set(list.map((t) => t.id));
+      const next = [...list];
+      for (const c of candidates) {
+        const isYouTube = c.platform === "youtube";
+        const key = isYouTube ? c.id : c.id.toLowerCase();
+        const seen = isYouTube ? yt : tw;
+        if (seen.has(key)) continue;
+        if (isYouTube ? !YOUTUBE_CHANNEL_ID_RE.test(key) : !TWITCH_LOGIN_RE.test(key)) continue;
+        seen.add(key);
+        let id = `${isYouTube ? "yt" : "tw"}-${key}`;
+        if (ids.has(id)) id = newId(isYouTube ? "yt" : "tw");
+        ids.add(id);
+        next.push({
+          id,
+          name: c.name || key,
+          group: group?.trim() || undefined,
+          youtubeChannelId: isYouTube ? key : undefined,
+          twitchLogin: isYouTube ? undefined : key,
+          avatarUrl: c.avatarUrl,
+        });
+        added++;
+      }
+      return next;
+    });
+    return added;
+  },
+  replaceAll(list: Talent[]) {
+    talentsStore.set(list);
+  },
+  reset() {
+    talentsStore.set(DEFAULT_TALENTS);
+  },
+};
+
+/** "yt:<channelId>" / "tw:<login>" → タレント */
+export function useTalentIndex(talents: Talent[]): Map<string, Talent> {
+  return useMemo(() => {
+    const map = new Map<string, Talent>();
+    for (const t of talents) {
+      if (t.youtubeChannelId) map.set(`yt:${t.youtubeChannelId}`, t);
+      if (t.twitchLogin) map.set(`tw:${t.twitchLogin.toLowerCase()}`, t);
+    }
+    return map;
+  }, [talents]);
+}
+
+export function talentForStream(index: Map<string, Talent>, s: Stream): Talent | undefined {
+  return index.get(`${s.platform === "youtube" ? "yt" : "tw"}:${s.channelId}`);
+}
+
+export function isFollowed(index: Map<string, Talent>, c: { platform: "youtube" | "twitch"; id: string }): boolean {
+  return index.has(c.platform === "youtube" ? `yt:${c.id}` : `tw:${c.id.toLowerCase()}`);
+}
+
+/* ---------- マルチビュー ---------- */
+
+export const MAX_MULTI = 9;
+
+export interface MultiItem {
+  uid: string;
+  source: string;
+  /** タレント名など */
+  label?: string;
+  /** 配信タイトル */
+  title?: string;
+  /** 2枚目以降はミュートで開始（音が重ならないように） */
+  startMuted: boolean;
+  /** ライブチャットがあるか（切り抜き・アーカイブは false）。不明なら undefined */
+  chat?: boolean;
+  addedAt: number;
+}
+
+export interface MultiInput {
+  source: string;
+  label?: string;
+  title?: string;
+  chat?: boolean;
+}
+
+function validateMulti(v: unknown): MultiItem[] | null {
+  if (!Array.isArray(v)) return null;
+  return v
+    .filter(
+      (m): m is MultiItem =>
+        !!m && typeof m === "object" && typeof m.uid === "string" && !!parseSourceKey(String(m.source)),
+    )
+    .slice(0, MAX_MULTI);
+}
+
+export const multiStore = createLocalStore<MultiItem[]>("oshiboard:multi:v1", [], validateMulti);
+
+export function useMulti(): MultiItem[] {
+  return useLocalStore(multiStore);
+}
+
+export type AddResult = "added" | "exists" | "full";
+
+export const multiActions = {
+  add(item: MultiInput): AddResult | "invalid" {
+    if (!parseSourceKey(item.source)) return "invalid";
+    const list = multiStore.get();
+    if (list.some((m) => m.source === item.source)) return "exists";
+    if (list.length >= MAX_MULTI) return "full";
+    multiStore.set([
+      ...list,
+      { ...item, uid: newId("m"), startMuted: list.length > 0, addedAt: Date.now() },
+    ]);
+    return "added";
+  },
+  /** 追加済みなら外す、なければ追加 */
+  toggle(item: MultiInput): AddResult | "invalid" | "removed" {
+    const existing = multiStore.get().find((m) => m.source === item.source);
+    if (existing) {
+      multiActions.remove(existing.uid);
+      return "removed";
+    }
+    return multiActions.add(item);
+  },
+  remove(uid: string) {
+    multiStore.set((list) => list.filter((m) => m.uid !== uid));
+  },
+  update(uid: string, patch: Partial<Pick<MultiItem, "label" | "title">>) {
+    multiStore.set((list) => list.map((m) => (m.uid === uid ? { ...m, ...patch } : m)));
+  },
+  /** 並び順を1つずらす（dir: -1 で前へ, 1 で後ろへ） */
+  move(uid: string, dir: -1 | 1) {
+    multiStore.set((list) => {
+      const i = list.findIndex((m) => m.uid === uid);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= list.length) return list;
+      const next = [...list];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  },
+  /** 先頭（メイン枠）に移動 */
+  promote(uid: string) {
+    multiStore.set((list) => {
+      const item = list.find((m) => m.uid === uid);
+      return item ? [item, ...list.filter((m) => m.uid !== uid)] : list;
+    });
+  },
+  clear() {
+    multiStore.set([]);
+  },
+  /** 共有URLから復元 */
+  replaceWithSources(sources: string[]) {
+    const now = Date.now();
+    multiStore.set(
+      sources.filter((source) => parseSourceKey(source)).slice(0, MAX_MULTI).map((source, i) => ({
+        uid: newId("m"),
+        source,
+        startMuted: i > 0,
+        addedAt: now + i,
+      })),
+    );
+  },
+};
+
+export interface MultiPrefs {
+  layout: LayoutMode;
+  chat: boolean;
+}
+
+export const multiPrefsStore = createLocalStore<MultiPrefs>("oshiboard:multi-prefs:v1", {
+  layout: "grid",
+  chat: false,
+});
+
+export function useMultiPrefs(): MultiPrefs {
+  return useLocalStore(multiPrefsStore);
+}
