@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { takeBudget } from "./cache";
 import { getYouTubeStreams } from "./youtube";
 
 /*
@@ -127,23 +128,61 @@ describe("getYouTubeStreams（問い合わせ回数）", () => {
     expect((await getYouTubeStreams(channels)).streams).toHaveLength(0);
   });
 
-  it("1000チャンネルを初めて読み込んでも、表示中のライブの更新に枠が残る", async () => {
+  it("1000チャンネルを初めて読み込んでも、表示中のライブの更新と、知っているチャンネルの新しい配信は止まらない", async () => {
     vi.setSystemTime(Date.parse("2026-10-03T00:00:00Z"));
-    const live = addChannels(3, 1, (_, v) => (v === 0 ? "live" : "none"));
+    const live = addChannels(3, 2, (ch, v) => (ch === 0 && v === 0 ? "live" : "none"));
     expect((await getYouTubeStreams(live)).streams.map((s) => s.status)).toEqual(["live"]);
 
-    // 1000チャンネル × 10本 = 200回分。初めて見る動画の枠（1時間200回）はここで使い切る
+    // 1000チャンネル × 10本 = 200回分。初めて見るチャンネルの枠（1時間200回、最初の1回を含む）はここで使い切る
     const heavy = addChannels(4, 1000);
     for (let i = 0; i < 10; i++) await getYouTubeStreams(heavy.slice(i * 100, (i + 1) * 100));
-    const afterHeavy = videoCalls.length;
-    expect(afterHeavy).toBe(200);
+    expect(videoCalls.length).toBe(200);
 
     // 別の人の初回分は後回しになるが、期限の切れたライブは問い合わせ直して出し続ける
     vi.setSystemTime(Date.parse("2026-10-03T00:05:00Z"));
+    const before = videoCalls.length;
     const others = addChannels(5, 20);
     const result = await getYouTubeStreams([...live, ...others]);
     expect(result.streams.map((s) => s.status)).toEqual(["live"]);
-    expect(videoCalls.slice(afterHeavy)).toEqual([[videoId(3, 0, 0)]]);
+    expect(videoCalls.slice(before).flat()).toContain(videoId(3, 0, 0));
     expect(result.errors.map((e) => e.message)).toContain("フォローが多いため、一部のチャンネルの配信情報はあとで取得します");
+
+    // 知っているチャンネルで新しく始まった配信は、初めて見るチャンネルの枠とは別に取る
+    vi.setSystemTime(Date.parse("2026-10-03T00:10:00Z"));
+    const fresh = "zzzzzzzzz01";
+    videos.set(fresh, { channelId: live[1], kind: "live" });
+    feeds.set(live[1], [fresh, ...feeds.get(live[1])!.slice(0, 9)]);
+    const withNew = await getYouTubeStreams(live);
+    expect(withNew.streams.map((s) => s.channelId).sort()).toEqual([...live].sort());
+    expect(withNew.errors).toEqual([]);
+  });
+
+  it("ほかの人のリクエストの空き枠で、期限の切れたライブもまとめて更新する", async () => {
+    vi.setSystemTime(Date.parse("2026-10-04T00:00:00Z"));
+    const a = addChannels(6, 1, (_, v) => (v === 0 ? "live" : "none"));
+    const b = addChannels(7, 1, (_, v) => (v === 0 ? "live" : "none"));
+    await getYouTubeStreams(a);
+    await getYouTubeStreams(b);
+
+    vi.setSystemTime(Date.parse("2026-10-04T00:02:00Z"));
+    const before = videoCalls.length;
+    await getYouTubeStreams(a);
+    // a の問い合わせに b のライブも相乗りしたので、b の更新では問い合わせない
+    expect(videoCalls.slice(before).flat()).toEqual(expect.arrayContaining([videoId(6, 0, 0), videoId(7, 0, 0)]));
+    const mid = videoCalls.length;
+    expect((await getYouTubeStreams(b)).streams.map((s) => s.status)).toEqual(["live"]);
+    expect(videoCalls.length).toBe(mid);
+  });
+
+  it("アプリ側の1時間の上限に達したら、枠が戻るまで前回のライブを出し続ける", async () => {
+    vi.setSystemTime(Date.parse("2026-10-05T00:00:00Z"));
+    const channels = addChannels(8, 1, (_, v) => (v === 0 ? "live" : "none"));
+    await getYouTubeStreams(channels);
+    while (takeBudget("yt:videos", 300, HOUR));
+
+    vi.setSystemTime(Date.parse("2026-10-05T00:40:00Z"));
+    const result = await getYouTubeStreams(channels);
+    expect(result.streams.map((s) => s.status)).toEqual(["live"]);
+    expect(result.errors.length).toBeGreaterThan(0);
   });
 });

@@ -20,8 +20,13 @@ interface Failure {
 }
 
 const MAX_PER_FAMILY = 3000;
-/** 件数が多くなる種類だけ上限を広げる（動画ごとの情報など。1件あたり数百バイト） */
-const FAMILY_LIMITS: Record<string, number> = { "yt:video": 20_000, "yt:views": 30_000 };
+/** 件数が多くなる種類だけ上限を広げる（動画ごとの情報など。1件あたり数百バイト。1000チャンネルで約1万件） */
+const FAMILY_LIMITS: Record<string, number> = { "yt:video": 50_000, "yt:views": 30_000 };
+/**
+ * 期限切れでも peekStale で使い続ける種類（終了済みの動画など）。あふれたとき期限切れをまとめて消さず、
+ * 使われていない順（touch / put の古い順）に消す。
+ */
+const LRU_FAMILIES = new Set(["yt:video"]);
 const MAX_FAILURES = 3000;
 
 const g = globalThis as typeof globalThis & {
@@ -45,10 +50,10 @@ function familyOf(key: string): Map<string, Entry> {
   return family;
 }
 
-function evict<T extends { expires: number }>(map: Map<string, T>, max: number) {
+function evict<T extends { expires: number }>(map: Map<string, T>, max: number, purgeExpired = true) {
   if (map.size <= max) return;
   const now = Date.now();
-  for (const [k, v] of map) if (v.expires <= now) map.delete(k);
+  if (purgeExpired) for (const [k, v] of map) if (v.expires <= now) map.delete(k);
   // 期限切れを消しても多ければ古い順に消す（Map は挿入順）
   for (const k of map.keys()) {
     if (map.size <= max) break;
@@ -69,9 +74,19 @@ export function peekStale<T>(key: string): T | undefined {
 
 export function put<T>(key: string, value: T, ttlMs: number): void {
   const family = familyOf(key);
+  const name = key.split(":", 2).join(":");
   family.delete(key);
   family.set(key, { value, expires: Date.now() + ttlMs });
-  evict(family, FAMILY_LIMITS[key.split(":", 2).join(":")] ?? MAX_PER_FAMILY);
+  evict(family, FAMILY_LIMITS[name] ?? MAX_PER_FAMILY, !LRU_FAMILIES.has(name));
+}
+
+/** 使ったことを記録する（LRU_FAMILIES で、あふれたときに後回しで消されるように）。期限は変えない */
+export function touch(key: string): void {
+  const family = familyOf(key);
+  const entry = family.get(key);
+  if (!entry) return;
+  family.delete(key);
+  family.set(key, entry);
 }
 
 /** 失敗を覚えている最中か（その間 cached() は API を呼ばずにエラーを返す） */

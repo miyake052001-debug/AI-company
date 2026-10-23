@@ -32,3 +32,24 @@ describe("takeBudget", () => {
     expect(results).toEqual([true, true, true, false]);
   });
 });
+
+describe("put（あふれたとき）", () => {
+  it("動画情報は期限切れをまとめて消さず、使われていない順に消す", async () => {
+    const { peekStale, put, touch } = await import("./cache");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-09-01T00:00:00Z"));
+      put("yt:video:keep", "keep", 1000);
+      put("yt:video:old", "old", 1000);
+      vi.setSystemTime(Date.parse("2026-09-02T00:00:00Z"));
+      touch("yt:video:keep");
+      for (let i = 0; i < 49_999; i++) put(`yt:video:fill${i}`, i, 60 * 60_000);
+      // 上限を1件超えたので、一番使われていない "old" だけが消える（期限切れの "keep" は残る）
+      expect(peekStale("yt:video:old")).toBeUndefined();
+      expect(peekStale("yt:video:keep")).toBe("keep");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

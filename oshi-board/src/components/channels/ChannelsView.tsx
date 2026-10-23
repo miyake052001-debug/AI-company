@@ -69,13 +69,15 @@ export function ChannelsView() {
     return map;
   }, [data]);
 
-  // プリセットの「フォロー済み」はチャンネルで判定する（取り込みや「見つける」で追加した人も含めるため）。
-  // YouTube と Twitch の両方を持つ人は、両方フォローしていてはじめて済みにする（片方だけなら追加で足せる）
+  // プリセットの「フォロー済み」: 同じIDの人がいる（手元で直した登録を含む）か、チャンネルがすべてフォロー済み。
+  // チャンネルで判定するのは、取り込みや「見つける」で追加した人も含めるため。片方だけなら追加で足せる
   const index = useTalentIndex(talents);
+  const ids = useMemo(() => new Set(talents.map((t) => t.id)), [talents]);
   const presetFollowed = (t: Talent) =>
-    (!!t.youtubeChannelId || !!t.twitchLogin) &&
-    (!t.youtubeChannelId || isFollowed(index, { platform: "youtube", id: t.youtubeChannelId })) &&
-    (!t.twitchLogin || isFollowed(index, { platform: "twitch", id: t.twitchLogin }));
+    ids.has(t.id) ||
+    ((!!t.youtubeChannelId || !!t.twitchLogin) &&
+      (!t.youtubeChannelId || isFollowed(index, { platform: "youtube", id: t.youtubeChannelId })) &&
+      (!t.twitchLogin || isFollowed(index, { platform: "twitch", id: t.twitchLogin })));
   const showFilter = talents.length > 10 || filter !== "";
   const q = showFilter ? filter.trim().toLowerCase() : "";
   const shown = q

@@ -50,8 +50,9 @@ export const talentActions = {
   },
   /**
    * まとめて追加（プリセット・JSON の読み込み）。追加した人数（チャンネルを足した人も含む）を返す。
+   *   - 同じIDの人がいれば飛ばす（チャンネルを直したり外したりした、手元の登録を優先する）
    *   - 持っているチャンネルがすべてフォロー済みなら飛ばす
-   *   - 一部だけフォロー済みなら、足りないチャンネルをその人（同じIDの人か、フォロー済みのチャンネルを持つ人）に足す
+   *   - 一部だけフォロー済みなら、足りないチャンネルを、フォロー済みのチャンネルを持つ人に足す
    *     （例: Twitch だけ取り込んだ人をプリセットから追加すると、YouTube も見るようになる）
    */
   addMany(talents: Talent[]): number {
@@ -68,21 +69,20 @@ export const talentActions = {
       };
       next.forEach(index);
       for (const t of talents) {
+        if (byId.has(t.id)) continue;
         const login = t.twitchLogin?.toLowerCase();
         const ytNew = !!t.youtubeChannelId && !byYt.has(t.youtubeChannelId);
         const twNew = !!login && !byTw.has(login);
         if (!ytNew && !twNew) {
-          // チャンネルのない人は、同じIDがなければそのまま追加する
-          if (t.youtubeChannelId || login || byId.has(t.id)) continue;
+          // チャンネルのない人はそのまま追加する
+          if (t.youtubeChannelId || login) continue;
           next.push(t);
           index(t, next.length - 1);
           added++;
           continue;
         }
         const ownerIndex =
-          byId.get(t.id) ??
-          (t.youtubeChannelId ? byYt.get(t.youtubeChannelId) : undefined) ??
-          (login ? byTw.get(login) : undefined);
+          (t.youtubeChannelId ? byYt.get(t.youtubeChannelId) : undefined) ?? (login ? byTw.get(login) : undefined);
         const owner = ownerIndex === undefined ? undefined : next[ownerIndex];
         const canMerge = owner && (!ytNew || !owner.youtubeChannelId) && (!twNew || !owner.twitchLogin);
         if (owner && ownerIndex !== undefined && canMerge) {
@@ -98,7 +98,6 @@ export const talentActions = {
           // フォロー済みのチャンネルは外して、新しいチャンネルだけの人として追加する
           const fresh: Talent = {
             ...t,
-            id: byId.has(t.id) ? newId(ytNew ? "yt" : "tw") : t.id,
             youtubeChannelId: ytNew ? t.youtubeChannelId : undefined,
             twitchLogin: twNew ? login : undefined,
           };

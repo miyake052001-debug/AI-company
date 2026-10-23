@@ -20,6 +20,7 @@ import {
   peekStale,
   put,
   takeBudget,
+  touch,
 } from "./cache";
 
 /*
@@ -145,6 +146,8 @@ export interface VideoInfo {
 
 /** 取得に失敗したとき、ライブ/予定の古い値を使ってよい時間（それ以上古いと終了済みを LIVE と出してしまう） */
 const STALE_ACTIVE_MS = 15 * 60_000;
+/** アプリ側の1時間の上限で取れないときは、枠が戻るまで（最長1時間）前回の値を出し続ける（何も出ないよりよい） */
+const STALE_ACTIVE_LIMITED_MS = 60 * 60_000;
 
 /**
  * 動画情報をキャッシュしておく時間。状態が変わりうるものだけ短くする。
@@ -168,11 +171,43 @@ const isSettled = (v: VideoInfo) => v.kind === "ended" || v.kind === "video";
 
 /**
  * 動画情報の問い合わせ（videos.list・50本で1ユニット）の1時間あたりの上限（1日の枠 10,000 の7割強）。
- * そのうち初めて見る動画の問い合わせは NEW_VIDEO_BATCHES_PER_HOUR まで。
- * フォローの多い人が初めて開いても（1000チャンネルで約200回）、表示中のライブ・予定の更新に必ず枠が残るようにする。
+ * そのうち、初めて見るチャンネル（大量の取り込み直後など）の動画は COLD_VIDEO_BATCHES_PER_HOUR まで。
+ * フォローの多い人が初めて開いても（1000チャンネルで約200回）、表示中のライブ・予定の更新と、
+ * 知っているチャンネルの新しい配信の取得に枠が残るようにする。
  */
 const VIDEO_BATCHES_PER_HOUR = 300;
-const NEW_VIDEO_BATCHES_PER_HOUR = 200;
+const COLD_VIDEO_BATCHES_PER_HOUR = 200;
+
+/**
+ * 最近ライブ・予定だった動画（古く取得した順）。期限の切れたものを、ほかのリクエストの問い合わせの空き枠
+ * （1回50本まで）に相乗りさせて更新する。利用者が多くても、更新の回数がリクエスト数ではなく動画数で決まるように。
+ */
+const activeVideos = new Set<string>();
+const MAX_ACTIVE_VIDEOS = 10_000;
+
+function rememberActive(info: VideoInfo) {
+  activeVideos.delete(info.id);
+  if ((info.kind === "live" || info.kind === "upcoming") && !FREE_CHAT_RE.test(info.title)) {
+    activeVideos.add(info.id);
+    if (activeVideos.size > MAX_ACTIVE_VIDEOS) activeVideos.delete(activeVideos.values().next().value!);
+  }
+}
+
+/** 相乗りさせる、期限の切れたライブ・予定（exclude 以外を最大 n 件） */
+function expiredActive(n: number, exclude: Set<string>): string[] {
+  const out: string[] = [];
+  let scanned = 0;
+  for (const id of activeVideos) {
+    if (out.length >= n || ++scanned > 500) break;
+    if (exclude.has(id)) continue;
+    const key = `yt:video:${id}`;
+    if (peek(key) !== undefined) continue;
+    const stale = peekStale<VideoInfo | null>(key);
+    if (stale && !isSettled(stale)) out.push(id);
+    else activeVideos.delete(id);
+  }
+  return out;
+}
 
 export function toVideoInfo(item: YtVideoItem): VideoInfo | null {
   const sn = item.snippet;
@@ -272,38 +307,49 @@ async function recentVideoIds(channelId: string): Promise<string[]> {
 
 /**
  * 動画詳細をまとめて取得。ライブ/予定以外は状態が変わらないので長めにキャッシュし、期限が切れても問い合わせ直さない。
- * 期限の切れたライブ・予定（いま表示しているもの）を先に、初めて見る動画をあとに問い合わせる。
+ * 期限の切れたライブ・予定と、知っているチャンネルの新しい動画を先に、初めて見るチャンネル（cold）の動画をあとに問い合わせる。
  * 一部のバッチが失敗しても、残りと（期限切れでも）前回の値で返す。
  */
-async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoInfo>; errors: string[] }> {
+async function videoDetails(
+  ids: string[],
+  cold: Set<string> = new Set(),
+): Promise<{ videos: Map<string, VideoInfo>; errors: string[] }> {
   const videos = new Map<string, VideoInfo>();
   const errors: string[] = [];
-  const refresh: string[] = [];
-  const unseen = new Set<string>();
-  for (const id of new Set(ids)) {
-    const hit = peek<VideoInfo | null>(`yt:video:${id}`);
+  const requested = new Set(ids);
+  const first: string[] = [];
+  const later: string[] = [];
+  for (const id of requested) {
+    const key = `yt:video:${id}`;
+    const hit = peek<VideoInfo | null>(key);
     if (hit !== undefined) {
       if (hit) videos.set(id, hit);
       continue;
     }
-    const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
-    if (stale && isSettled(stale)) videos.set(id, stale);
-    else if (stale) refresh.push(id);
-    else unseen.add(id);
+    const stale = peekStale<VideoInfo | null>(key);
+    if (stale && isSettled(stale)) {
+      videos.set(id, stale);
+      touch(key);
+    } else if (cold.has(id) && stale === undefined) later.push(id);
+    else first.push(id);
   }
 
-  let allowUnseen = true;
+  let allowCold = true;
   let deferred = false;
-  for (const fullBatch of chunk([...refresh, ...unseen], 50)) {
-    let batch = fullBatch;
-    if (allowUnseen && batch.some((id) => unseen.has(id))) {
-      allowUnseen = takeBudget("yt:videos-new", NEW_VIDEO_BATCHES_PER_HOUR, HOUR);
-    }
-    if (!allowUnseen) {
-      // 初めて見る動画は次回以降に回す（表示中のものの更新を優先）
-      if (batch.some((id) => unseen.has(id))) deferred = true;
-      batch = batch.filter((id) => !unseen.has(id));
+  const batches = chunk([...first, ...later], 50);
+  for (let i = 0; i < batches.length; i++) {
+    let batch = batches[i];
+    const hasCold = batch.some((id) => cold.has(id));
+    if (allowCold && hasCold) allowCold = takeBudget("yt:videos-cold", COLD_VIDEO_BATCHES_PER_HOUR, HOUR);
+    if (!allowCold && hasCold) {
+      // 初めて見るチャンネルの動画は次回以降に回す
+      deferred = true;
+      batch = batch.filter((id) => !cold.has(id));
       if (batch.length === 0) continue;
+    }
+    // 最後のバッチの空きに、ほかの人が見ている期限切れのライブ・予定を相乗りさせる（追加のユニットはかからない）
+    if (i === batches.length - 1 && batch.length < 50) {
+      batch = [...batch, ...expiredActive(50 - batch.length, new Set(batch))];
     }
     try {
       if (!takeBudget("yt:videos", VIDEO_BATCHES_PER_HOUR, HOUR)) {
@@ -319,19 +365,30 @@ async function videoDetails(ids: string[]): Promise<{ videos: Map<string, VideoI
         const info = toVideoInfo(item);
         if (!info) continue;
         found.add(info.id);
-        videos.set(info.id, info);
+        if (requested.has(info.id)) videos.set(info.id, info);
         put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, videoTtl(info, Date.now()));
+        rememberActive(info);
       }
       // 非公開・削除済みは null をキャッシュして毎回問い合わせない
-      for (const id of batch) if (!found.has(id)) put(`yt:video:${id}`, null, 6 * HOUR);
+      for (const id of batch) {
+        if (found.has(id)) continue;
+        put(`yt:video:${id}`, null, 6 * HOUR);
+        activeVideos.delete(id);
+      }
     } catch (e) {
       errors.push(errorMessage(e));
+      const grace = e instanceof LimitError ? STALE_ACTIVE_LIMITED_MS : STALE_ACTIVE_MS;
       for (const id of batch) {
-        const stale = peekStale<VideoInfo | null>(`yt:video:${id}`);
+        if (!requested.has(id)) continue;
+        const key = `yt:video:${id}`;
+        const stale = peekStale<VideoInfo | null>(key);
         if (!stale) continue;
-        // ライブ/予定は、本来の期限を過ぎてから STALE_ACTIVE_MS までだけ使う（終了済みを LIVE と出し続けないように）
+        // ライブ/予定は、本来の期限を過ぎてから grace までだけ使う（終了済みを LIVE と出し続けないように）
         const fetchedAt = stale.fetchedAt ?? 0;
-        if (Date.now() - fetchedAt < videoTtl(stale, fetchedAt) + STALE_ACTIVE_MS) videos.set(id, stale);
+        if (Date.now() - fetchedAt < videoTtl(stale, fetchedAt) + grace) {
+          videos.set(id, stale);
+          touch(key);
+        }
       }
     }
   }
@@ -395,7 +452,12 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
     }
   });
 
-  const details = await videoDetails(recent.flat());
+  // 動画が1本もキャッシュにないチャンネル（取り込み直後など）は、別枠でゆっくり取る
+  const cold = new Set<string>();
+  for (const ids of recent) {
+    if (ids.length > 0 && ids.every((id) => peekStale(`yt:video:${id}`) === undefined)) ids.forEach((id) => cold.add(id));
+  }
+  const details = await videoDetails(recent.flat(), cold);
   for (const message of new Set(details.errors)) errors.push({ channel: "youtube", message });
 
   // アイコンは存在が確認できたチャンネルだけ取る（存在しないIDで channels.list を使わせない）

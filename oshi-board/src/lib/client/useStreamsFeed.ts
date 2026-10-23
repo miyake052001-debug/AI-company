@@ -92,10 +92,13 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
     const list = key.split("\n");
     let alive = true;
     let ctrl: AbortController | null = null;
+    // この画面で取得を始めた時刻（取得中にタブへ戻っても、始めたばかりの取得をやり直さない）
+    let startedAt = 0;
 
     const run = async () => {
       ctrl?.abort();
       const current = (ctrl = new AbortController());
+      startedAt = Date.now();
       const cache: RequestCache = forceRef.current ? "no-cache" : "default";
       forceRef.current = false;
       const results = await Promise.allSettled(
@@ -124,7 +127,7 @@ export function usePollingMany<T>(urls: string[] | null, intervalMs: number) {
     };
 
     // 直近に取ったばかりなら（別ページから戻ってきただけ・別の画面が取ったばかりなら）取り直さない
-    const stale = () => Date.now() - (recent.get(key)?.attemptedAt ?? 0) >= intervalMs / 2;
+    const stale = () => Date.now() - Math.max(startedAt, recent.get(key)?.attemptedAt ?? 0) >= intervalMs / 2;
     if (stale()) void run();
     const timer = setInterval(() => {
       if (document.visibilityState === "visible" && stale()) void run();

@@ -80,6 +80,23 @@ describe("talentActions.addMany", () => {
     expect(talentActions.addMany([{ id: "vspo-beni", name: "八雲べに", youtubeChannelId: "UCjXBuHmWkieBApgBhDuJMMQ", twitchLogin: "beni_yakumo" }])).toBe(0);
   });
 
+  it("同じIDの人がいれば、チャンネルを直したり外したりしていても触らない", async () => {
+    const { talentActions, talentsStore } = await import("./state");
+    talentsStore.set([
+      { id: "vspo-sumire", name: "花芽すみれ", twitchLogin: "kagasumire_new" },
+      { id: "vspo-hinano", name: "橘ひなの", youtubeChannelId: "UCvUc0m317LWTTPZoBQV479A" },
+    ]);
+    const added = talentActions.addMany([
+      { id: "vspo-sumire", name: "花芽すみれ", youtubeChannelId: "UCyLGcqYs7RsBb3L0SJfzGYA", twitchLogin: "kagasumire" },
+      { id: "vspo-hinano", name: "橘ひなの", youtubeChannelId: "UCvUc0m317LWTTPZoBQV479A", twitchLogin: "hinanotachiba7" },
+    ]);
+    expect(added).toBe(0);
+    expect(talentsStore.get()).toEqual([
+      { id: "vspo-sumire", name: "花芽すみれ", twitchLogin: "kagasumire_new" },
+      { id: "vspo-hinano", name: "橘ひなの", youtubeChannelId: "UCvUc0m317LWTTPZoBQV479A" },
+    ]);
+  });
+
   it("足す先の人がその種類のチャンネルを別に持っていれば、新しいチャンネルだけの人として追加する", async () => {
     const { talentActions, talentsStore } = await import("./state");
     talentsStore.set([{ id: "x", name: "X", twitchLogin: "shared", youtubeChannelId: "UCaaaaaaaaaaaaaaaaaaaaaa" }]);
