@@ -43,6 +43,7 @@ const FREE_CHAT_RE = /フリー\s*チャット|free\s*chat|freechat|フリチャ
 const PLAYLIST_FALLBACK_PER_HOUR = 300;
 const SEARCH_BUDGET = "yt:search";
 const RESOLVE_PER_HOUR = 200;
+const CHANNEL_LOOKUPS_PER_HOUR = 120;
 
 export function youtubeEnabled(): boolean {
   return !!process.env.YOUTUBE_API_KEY;
@@ -299,6 +300,10 @@ async function channelSnippets(channelIds: string[]): Promise<Map<string, Channe
     else if (hit) out.set(id, hit);
   }
   for (const batch of chunk(missing, 50)) {
+    // 外部から任意のチャンネルIDを渡せるので、未取得分の問い合わせは1時間あたりの上限まで
+    if (!takeBudget("yt:channels", CHANNEL_LOOKUPS_PER_HOUR, HOUR)) {
+      throw new LimitError("YouTube のチャンネル情報の取得が混み合っています。しばらくしてから再試行します");
+    }
     const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
       "channels",
       { part: "snippet", id: batch.join(","), maxResults: "50" },
@@ -320,9 +325,12 @@ async function channelSnippets(channelIds: string[]): Promise<Map<string, Channe
 
 export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams: Stream[]; errors: ChannelError[] }> {
   const errors: ChannelError[] = [];
+  const found: string[] = [];
   const recent = await mapLimit(channelIds, 8, async (id) => {
     try {
-      return await recentVideoIds(id);
+      const ids = await recentVideoIds(id);
+      found.push(id);
+      return ids;
     } catch (e) {
       errors.push({ channel: `yt:${id}`, message: errorMessage(e) });
       return [];
@@ -332,9 +340,10 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
   const details = await videoDetails(recent.flat());
   for (const message of new Set(details.errors)) errors.push({ channel: "youtube", message });
 
+  // アイコンは存在が確認できたチャンネルだけ取る（存在しないIDで channels.list を使わせない）
   let snippets = new Map<string, ChannelSnippet>();
   try {
-    snippets = await channelSnippets(channelIds);
+    snippets = await channelSnippets(found);
   } catch {}
 
   const now = Date.now();
@@ -507,86 +516,120 @@ function decodeEntities(s: string): string {
     .replace(/&gt;/g, ">");
 }
 
-/** チャンネルページの HTML から ID を拾う（APIキーなしでも使える） */
+/**
+ * チャンネルページの HTML から ID を拾う（APIキーなしでも使える）。
+ * 404 はチャンネルなし（null）。それ以外の失敗（429・5xx・同意画面など）は一時的なものとして例外にする。
+ */
 async function scrapeChannelPage(url: string): Promise<ResolvedYouTubeChannel | null> {
   const res = await fetch(url, {
     cache: "no-store",
     headers: { "Accept-Language": "ja,en;q=0.8", "User-Agent": "Mozilla/5.0 (compatible; OshiBoard/1.0)" },
   });
-  if (!res.ok) return null;
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`YouTube のページを読み込めませんでした（${res.status}）。しばらくしてから再試行してください`);
   const html = await res.text();
   const id =
     /<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[\w-]{22})"/.exec(html)?.[1] ??
     /"externalId":"(UC[\w-]{22})"/.exec(html)?.[1] ??
     /"channelId":"(UC[\w-]{22})"/.exec(html)?.[1];
-  if (!id) return null;
+  if (!id) throw new Error("YouTube のページからチャンネルを読み取れませんでした。チャンネルURL（/channel/UC...）で試してください");
   const name = /<meta property="og:title" content="([^"]*)"/.exec(html)?.[1];
   const avatar = /<meta property="og:image" content="([^"]*)"/.exec(html)?.[1];
   return { channelId: id, name: name ? decodeEntities(name) : undefined, avatarUrl: avatar };
 }
 
-/** 入力ごとに1時間キャッシュ（同じURLを何度も解決しない） */
-export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouTubeChannel | null> {
-  const raw = input.trim();
-  return cached<ResolvedYouTubeChannel | null>(
-    `yt:resolve:${raw.toLowerCase()}`,
-    { ttl: (r) => (r ? HOUR : 5 * 60_000), errorTtl: 60_000 },
-    () => resolveUncached(raw),
-  );
-}
+type ChannelInput = { kind: "id"; id: string } | { kind: "handle"; handle: string } | { kind: "c" | "user"; name: string };
 
-async function resolveUncached(raw: string): Promise<ResolvedYouTubeChannel | null> {
-  const idMatch = /(UC[\w-]{22})/.exec(raw);
-  const legacyMatch = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
-  let legacy: { kind: string; name: string } | undefined;
-  if (legacyMatch) {
-    let name = legacyMatch[2];
+function parseChannelInput(raw: string): ChannelInput | null {
+  const id = /(UC[\w-]{22})/.exec(raw)?.[1];
+  if (id && YOUTUBE_CHANNEL_ID_RE.test(id)) return { kind: "id", id };
+  const legacy = /youtube\.com\/(c|user)\/([^/?#\s]+)/.exec(raw);
+  if (legacy) {
+    let name = legacy[2];
     try {
       name = decodeURIComponent(name);
     } catch {}
-    legacy = { kind: legacyMatch[1], name };
+    return { kind: legacy[1] as "c" | "user", name };
   }
-  let handle = /(?:^|\/)@([^/?#\s]+)/.exec(raw)?.[1] ?? (!legacy && /^[\w.-]{3,30}$/.test(raw) ? raw : undefined);
-  if (handle) {
-    try {
-      handle = decodeURIComponent(handle);
-    } catch {
-      return null;
-    }
+  const handle = /(?:^|\/)@([^/?#\s]+)/.exec(raw)?.[1] ?? (/^[\w.-]{3,30}$/.test(raw) ? raw : undefined);
+  if (!handle) return null;
+  try {
+    return { kind: "handle", handle: decodeURIComponent(handle) };
+  } catch {
+    return null;
   }
+}
+
+interface ResolveResult {
+  channel: ResolvedYouTubeChannel | null;
+  /** API やページで確認できた結果か（false は ID をそのまま返しただけの推測） */
+  confirmed: boolean;
+}
+
+/**
+ * チャンネルURL / @ハンドル / ID をチャンネルIDにする。
+ * 入力の種類ごとの正規形でキャッシュする（チャンネルIDは大文字小文字を区別、ハンドル等は区別しない）。
+ */
+export async function resolveYouTubeChannel(input: string): Promise<ResolvedYouTubeChannel | null> {
+  const parsed = parseChannelInput(input.trim());
+  if (!parsed) return null;
+  const key =
+    parsed.kind === "id"
+      ? `id:${parsed.id}`
+      : parsed.kind === "handle"
+        ? `handle:${parsed.handle.toLowerCase()}`
+        : `${parsed.kind}:${parsed.name.toLowerCase()}`;
+  const result = await cached<ResolveResult>(
+    `yt:resolve:${key}`,
+    {
+      ttl: (r) => (!r.confirmed ? 60_000 : r.channel ? HOUR : 5 * 60_000),
+      errorTtl: 60_000,
+    },
+    () => resolveUncached(parsed),
+  );
+  return result.channel;
+}
+
+async function resolveUncached(input: ChannelInput): Promise<ResolveResult> {
+  const params: Record<string, string> | null =
+    input.kind === "id"
+      ? { part: "snippet", id: input.id }
+      : input.kind === "handle"
+        ? { part: "snippet", forHandle: `@${input.handle}` }
+        : input.kind === "user"
+          ? { part: "snippet", forUsername: input.name }
+          : null;
 
   // channels.list は1回1ユニット。外部から好きな入力で叩けるので1時間あたりの上限を設け、超えたらページ読み取りで代替
-  if (youtubeEnabled() && takeBudget("yt:resolve", RESOLVE_PER_HOUR, HOUR)) {
-    const params: Record<string, string> | null = idMatch
-      ? { part: "snippet", id: idMatch[1] }
-      : handle
-        ? { part: "snippet", forHandle: `@${handle}` }
-        : legacy?.kind === "user"
-          ? { part: "snippet", forUsername: legacy.name }
-          : null;
-    if (params) {
-      try {
-        const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
-          "channels",
-          params,
-        );
-        const item = data.items?.[0];
-        if (item) {
-          return { channelId: item.id, name: item.snippet.title, avatarUrl: item.snippet.thumbnails?.default?.url };
-        }
-        if (idMatch) return null;
-      } catch {
-        // API が使えないとき（クォータ切れなど）はページの読み取りにフォールバック
-      }
+  if (params && youtubeEnabled() && takeBudget("yt:resolve", RESOLVE_PER_HOUR, HOUR)) {
+    try {
+      const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
+        "channels",
+        params,
+      );
+      const item = data.items?.[0];
+      const channel = item
+        ? { channelId: item.id, name: item.snippet.title, avatarUrl: item.snippet.thumbnails?.default?.url }
+        : null;
+      return { channel, confirmed: true };
+    } catch {
+      // API が使えないとき（クォータ切れなど）はページの読み取りにフォールバック
     }
   }
 
-  if (idMatch && YOUTUBE_CHANNEL_ID_RE.test(idMatch[1])) {
-    return (await scrapeChannelPage(`https://www.youtube.com/channel/${idMatch[1]}`)) ?? { channelId: idMatch[1] };
+  const url =
+    input.kind === "id"
+      ? `https://www.youtube.com/channel/${input.id}`
+      : input.kind === "handle"
+        ? `https://www.youtube.com/@${encodeURIComponent(input.handle)}`
+        : `https://www.youtube.com/${input.kind}/${encodeURIComponent(input.name)}`;
+  try {
+    return { channel: await scrapeChannelPage(url), confirmed: true };
+  } catch (e) {
+    // ID の形をしていれば、確認できなくてもそのまま使えるようにする（短時間だけキャッシュ）
+    if (input.kind === "id") return { channel: { channelId: input.id }, confirmed: false };
+    throw e;
   }
-  if (handle) return scrapeChannelPage(`https://www.youtube.com/@${encodeURIComponent(handle)}`);
-  if (legacy) return scrapeChannelPage(`https://www.youtube.com/${legacy.kind}/${encodeURIComponent(legacy.name)}`);
-  return null;
 }
 
 /** 貼り付けた動画URLのタイトル取得（oEmbed・キー不要） */

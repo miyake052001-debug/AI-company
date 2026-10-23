@@ -79,12 +79,18 @@ export function clientIp(headers: Headers): string {
     .map((s) => s.trim())
     .filter(Boolean);
   const hops = Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1);
-  const ip = normalizeIp(forwarded[Math.max(0, forwarded.length - hops)] ?? "unknown");
-  if (!warnedLocal && !trustedHeader && (ip === "unknown" || isLocalAddress(ip))) {
-    // 全員がプロキシのアドレスに見えている（プロキシが X-Forwarded-For を付けていない）可能性が高い
+  const rawIp = forwarded[Math.max(0, forwarded.length - hops)] ?? "unknown";
+  const ip = normalizeIp(rawIp);
+  // プロキシが X-Real-IP だけを付けて X-Forwarded-For を付けていない（全員がプロキシのアドレスに見える）設定の検出
+  if (
+    !warnedLocal &&
+    process.env.NODE_ENV === "production" &&
+    (ip === "unknown" || isLocalAddress(ip)) &&
+    headers.has("x-real-ip")
+  ) {
     warnedLocal = true;
     console.warn(
-      `[oshi-board] 接続元IPが ${ip} と判定されました。プロキシで X-Forwarded-For を付けるか、TRUSTED_IP_HEADER を設定してください（README の「デプロイ」参照）。`,
+      `[oshi-board] 接続元IPがプロキシのアドレス（${rawIp}）になっています。プロキシで X-Forwarded-For を付けるか、TRUSTED_IP_HEADER=x-real-ip を設定してください（README の「デプロイ」参照）。`,
     );
   }
   return ip;
