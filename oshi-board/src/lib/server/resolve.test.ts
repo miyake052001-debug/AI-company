@@ -31,3 +31,23 @@ describe("resolveYouTubeChannel（APIキーなし＝ページ読み取り）", (
     expect(await resolveYouTubeChannel("UCtemporaryfailure000000")).toEqual({ channelId: "UCtemporaryfailure000000" });
   });
 });
+
+describe("searchYouTubeClips", () => {
+  it("RSS が一時的に 404 でも、channels.list で確認できれば「見つかりません」にしない", async () => {
+    vi.stubEnv("YOUTUBE_API_KEY", "test-key");
+    const id = "UCrsstemporary404xxxxxxx";
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/feeds/videos.xml")) return new Response("", { status: 404 });
+      if (url.includes("/youtube/v3/channels")) {
+        return Response.json({ items: [{ id, snippet: { title: "Test Ch. テスト" } }] });
+      }
+      if (url.includes("/youtube/v3/search")) return Response.json({ items: [] });
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { searchYouTubeClips } = await import("./youtube");
+    await expect(searchYouTubeClips({ name: "テスト", youtubeChannelId: id }, "7d")).resolves.toEqual([]);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/youtube/v3/channels"))).toBe(true);
+  });
+});

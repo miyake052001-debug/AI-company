@@ -44,6 +44,8 @@ const PLAYLIST_FALLBACK_PER_HOUR = 300;
 const SEARCH_BUDGET = "yt:search";
 const RESOLVE_PER_HOUR = 200;
 const CHANNEL_LOOKUPS_PER_HOUR = 120;
+/** RSS で存在を確認できなかったチャンネルの問い合わせ上限（別枠。ランダムなIDで通常枠を使い切らせない） */
+const UNVERIFIED_LOOKUPS_PER_HOUR = 30;
 
 export function youtubeEnabled(): boolean {
   return !!process.env.YOUTUBE_API_KEY;
@@ -296,6 +298,7 @@ interface ChannelSnippet {
  */
 async function channelSnippets(
   channelIds: string[],
+  budget: { name: string; perHour: number } = { name: "yt:channels", perHour: CHANNEL_LOOKUPS_PER_HOUR },
 ): Promise<{ snippets: Map<string, ChannelSnippet>; limited: boolean }> {
   const out = new Map<string, ChannelSnippet>();
   const missing: string[] = [];
@@ -306,7 +309,7 @@ async function channelSnippets(
   }
   for (const batch of chunk(missing, 50)) {
     // 外部から任意のチャンネルIDを渡せるので、未取得分の問い合わせは1時間あたりの上限まで
-    if (!takeBudget("yt:channels", CHANNEL_LOOKUPS_PER_HOUR, HOUR)) return { snippets: out, limited: true };
+    if (!takeBudget(budget.name, budget.perHour, HOUR)) return { snippets: out, limited: true };
     const data = await ytApi<{ items?: { id: string; snippet: { title: string; thumbnails?: YtThumbs } }[] }>(
       "channels",
       { part: "snippet", id: batch.join(","), maxResults: "50" },
@@ -363,14 +366,14 @@ export async function getYouTubeStreams(channelIds: string[]): Promise<{ streams
 /* ---------- 切り抜き ---------- */
 
 /**
- * チャンネルが存在するかを RSS（無料）で確かめる。
- * 外部から任意のIDで切り抜き検索を呼べるので、存在しないIDで channels.list の上限を使わせないため。
+ * チャンネルの RSS（無料）が取れるか。
+ * RSS は実在するチャンネルでも一時的に 404 を返すことがあるので、404 でも「存在しない」とは決めつけない
+ * （呼び出し側で別枠の channels.list に回す）。
  */
 async function channelFeedStatus(channelId: string): Promise<"found" | "missing" | "unknown"> {
-  if (peek(`yt:recent:${channelId}`) !== undefined) return "found";
   return cached<"found" | "missing" | "unknown">(
     `yt:feed:${channelId}`,
-    { ttl: (st) => (st === "found" ? 6 * HOUR : st === "missing" ? 30 * 60_000 : 60_000) },
+    { ttl: (st) => (st === "found" ? 6 * HOUR : 2 * 60_000) },
     async () => {
       try {
         const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { cache: "no-store" });
@@ -469,8 +472,15 @@ export async function searchYouTubeClips(
     `yt:clips:${channelId}:${period}`,
     { ttl: plan.ttl, errorTtl: (e) => (isQuotaError(e) ? HOUR : 10 * 60_000), staleOnError: true },
     async () => {
-      if ((await channelFeedStatus(channelId)) === "missing") throw new Error("YouTube チャンネルが見つかりません");
-      const { snippets, limited } = await channelSnippets([channelId]);
+      // 外部から任意のIDで呼べるので、存在が確認できていないIDは別枠（少なめ）の上限で channels.list を使う
+      const known =
+        !!peekStale<ChannelSnippet | null>(`yt:channel:${channelId}`) ||
+        peekStale(`yt:recent:${channelId}`) !== undefined ||
+        (await channelFeedStatus(channelId)) === "found";
+      const { snippets, limited } = await channelSnippets(
+        [channelId],
+        known ? undefined : { name: "yt:channels-unverified", perHour: UNVERIFIED_LOOKUPS_PER_HOUR },
+      );
       const channel = snippets.get(channelId);
       if (!channel) {
         throw limited
