@@ -174,6 +174,23 @@ describe("getYouTubeStreams（問い合わせ回数）", () => {
     expect(videoCalls.length).toBe(mid);
   });
 
+  it("予定がたくさんあっても、その後ろの期限切れのライブを相乗りで更新する", async () => {
+    vi.setSystemTime(Date.parse("2026-10-07T00:00:00Z"));
+    // 予定（30分キャッシュ）が600件ある状態で、ライブ（90秒）はその後ろに並ぶ
+    const planned = addChannels(10, 600, (_, v) => (v === 0 ? "upcoming" : "none"));
+    for (let i = 0; i < 6; i++) await getYouTubeStreams(planned.slice(i * 100, (i + 1) * 100));
+    vi.setSystemTime(Date.parse("2026-10-07T00:01:00Z"));
+    const a = addChannels(11, 1, (_, v) => (v === 0 ? "live" : "none"));
+    const b = addChannels(12, 1, (_, v) => (v === 0 ? "live" : "none"));
+    await getYouTubeStreams(a);
+    await getYouTubeStreams(b);
+
+    vi.setSystemTime(Date.parse("2026-10-07T00:03:00Z"));
+    const before = videoCalls.length;
+    await getYouTubeStreams(a);
+    expect(videoCalls.slice(before).flat()).toEqual(expect.arrayContaining([videoId(11, 0, 0), videoId(12, 0, 0)]));
+  });
+
   it("アプリ側の1時間の上限に達したら、枠が戻るまで前回のライブを出し続ける", async () => {
     vi.setSystemTime(Date.parse("2026-10-05T00:00:00Z"));
     const channels = addChannels(8, 1, (_, v) => (v === 0 ? "live" : "none"));

@@ -185,23 +185,35 @@ const COLD_VIDEO_BATCHES_PER_HOUR = 200;
 const activeVideos = new Set<string>();
 const MAX_ACTIVE_VIDEOS = 10_000;
 
-function rememberActive(info: VideoInfo) {
+/** 一覧に出しうるライブ・予定か（相乗りで更新する対象。2週間以上先の予定やフリーチャット枠は除く） */
+function isShownActive(info: VideoInfo, now: number): boolean {
+  if (info.kind === "live") return true;
+  if (info.kind !== "upcoming" || FREE_CHAT_RE.test(info.title)) return false;
+  const t = info.startAt ? Date.parse(info.startAt) : NaN;
+  return !Number.isNaN(t) && t <= now + UPCOMING_MAX_AHEAD_MS && t >= now - UPCOMING_STALE_MS;
+}
+
+function rememberActive(info: VideoInfo, now: number) {
   activeVideos.delete(info.id);
-  if ((info.kind === "live" || info.kind === "upcoming") && !FREE_CHAT_RE.test(info.title)) {
+  if (isShownActive(info, now)) {
     activeVideos.add(info.id);
     if (activeVideos.size > MAX_ACTIVE_VIDEOS) activeVideos.delete(activeVideos.values().next().value!);
   }
 }
 
-/** 相乗りさせる、期限の切れたライブ・予定（exclude 以外を最大 n 件） */
+/**
+ * 相乗りさせる、期限の切れたライブ・予定（exclude 以外を最大 n 件）。
+ * 予定（最長30分キャッシュ）の後ろにライブ（90秒）が並ぶので、まだ期限内のものは数えずに最後まで見る（最大 MAX_ACTIVE_VIDEOS 件）。
+ */
 function expiredActive(n: number, exclude: Set<string>): string[] {
   const out: string[] = [];
-  let scanned = 0;
+  let checked = 0;
   for (const id of activeVideos) {
-    if (out.length >= n || ++scanned > 500) break;
+    if (out.length >= n) break;
     if (exclude.has(id)) continue;
     const key = `yt:video:${id}`;
     if (peek(key) !== undefined) continue;
+    if (++checked > 500) break;
     const stale = peekStale<VideoInfo | null>(key);
     if (stale && !isSettled(stale)) out.push(id);
     else activeVideos.delete(id);
@@ -324,6 +336,7 @@ async function videoDetails(
     const hit = peek<VideoInfo | null>(key);
     if (hit !== undefined) {
       if (hit) videos.set(id, hit);
+      touch(key);
       continue;
     }
     const stale = peekStale<VideoInfo | null>(key);
@@ -367,7 +380,7 @@ async function videoDetails(
         found.add(info.id);
         if (requested.has(info.id)) videos.set(info.id, info);
         put(`yt:video:${info.id}`, { ...info, fetchedAt: Date.now() }, videoTtl(info, Date.now()));
-        rememberActive(info);
+        rememberActive(info, Date.now());
       }
       // 非公開・削除済みは null をキャッシュして毎回問い合わせない
       for (const id of batch) {
